@@ -1,26 +1,21 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = 3001;
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// ============ TIDB ============
+// ============ TIDB CONNECTION ============
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST,
+  host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
   port: Number(process.env.DB_PORT) || 4000,
-  user: process.env.DB_USERNAME,
-  password: process.env.DB_PASSWORD,
+  user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
+  password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
   database: process.env.DB_DATABASE || 'test',
   ssl: { rejectUnauthorized: true },
   waitForConnections: true,
@@ -30,6 +25,7 @@ const pool = mysql.createPool({
 async function initDatabase() {
   const conn = await pool.getConnection();
   try {
+    // 1. Projects Table
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS projects (
         id VARCHAR(36) PRIMARY KEY,
@@ -41,58 +37,43 @@ async function initDatabase() {
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
-    console.log('TiDB: projects table ready');
+
+    // 2. Events Table (Replaces local events filesystem files)
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS events (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        project_id VARCHAR(36) NULL,
+        event_data JSON NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // 3. Sessions Table (Replaces local sessions filesystem files)
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        project_id VARCHAR(36) NULL,
+        session_data JSON NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        recorded_at VARCHAR(255) NOT NULL
+      )
+    `);
+
+    console.log('TiDB: All database tables verified and ready');
   } finally {
     conn.release();
   }
 }
-
-// ============ LOCAL FILE HELPERS (events/sessions only) ============
-
-const dataDir = path.join(__dirname, 'data');
-const sessionDir = path.join(dataDir, 'session');
-const projectsDir = path.join(dataDir, 'projects');
-
-async function ensureDirectories() {
-  await fs.mkdir(dataDir, { recursive: true });
-  await fs.mkdir(sessionDir, { recursive: true });
-  await fs.mkdir(projectsDir, { recursive: true });
-}
-
-async function readJsonFile(filePath) {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return content.trim() ? JSON.parse(content) : null;
-  } catch { return null; }
-}
-
-async function writeJsonFile(filePath, data) {
-  try {
-    await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-    return true;
-  } catch (error) {
-    console.error(`Error writing ${filePath}:`, error);
-    return false;
-  }
-}
-
-await ensureDirectories();
-
-// Ensure data.json and events.txt exist
-const jsonFile = path.join(dataDir, 'data.json');
-const logFile = path.join(dataDir, 'events.txt');
-try { await fs.access(jsonFile); } catch { await fs.writeFile(jsonFile, JSON.stringify({ events: [] })); }
-try { await fs.access(logFile); } catch { await fs.writeFile(logFile, ''); }
 
 // ============ GLOBAL EVENTS & SESSIONS ============
 
 app.post('/api/events/track', async (req, res) => {
   try {
     const event = req.body;
-    await fs.appendFile(logFile, JSON.stringify(event) + '\n');
-    const jsonData = await readJsonFile(jsonFile) || { events: [] };
-    jsonData.events.push(event);
-    await writeJsonFile(jsonFile, jsonData);
+    await pool.execute(
+      'INSERT INTO events (project_id, event_data) VALUES (NULL, ?)',
+      [JSON.stringify(event)]
+    );
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save event', details: error.message });
@@ -101,9 +82,14 @@ app.post('/api/events/track', async (req, res) => {
 
 app.post('/api/session', async (req, res) => {
   try {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filePath = path.join(sessionDir, `session_${timestamp}.json`);
-    await writeJsonFile(filePath, { ...req.body, timestamp: new Date().toISOString(), recordedAt: timestamp });
+    const timestamp = new Date().toISOString();
+    const recordedAt = timestamp.replace(/[:.]/g, '-');
+    const sessionData = { ...req.body, timestamp, recordedAt };
+
+    await pool.execute(
+      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (NULL, ?, ?, ?)',
+      [JSON.stringify(sessionData), new Date(), recordedAt]
+    );
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save session', details: error.message });
@@ -112,7 +98,9 @@ app.post('/api/session', async (req, res) => {
 
 app.get('/api/events', async (req, res) => {
   try {
-    res.json(await readJsonFile(jsonFile) || { events: [] });
+    const [rows] = await pool.execute('SELECT event_data FROM events WHERE project_id IS NULL ORDER BY created_at DESC');
+    const events = rows.map(r => typeof r.event_data === 'string' ? JSON.parse(r.event_data) : r.event_data);
+    res.json({ events });
   } catch (error) {
     res.status(500).json({ error: 'Failed to read events', details: error.message });
   }
@@ -120,11 +108,8 @@ app.get('/api/events', async (req, res) => {
 
 app.get('/api/sessions', async (req, res) => {
   try {
-    const files = await fs.readdir(sessionDir);
-    const sessions = (await Promise.all(
-      files.filter(f => f.endsWith('.json')).map(f => readJsonFile(path.join(sessionDir, f)))
-    )).filter(Boolean);
-    sessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const [rows] = await pool.execute('SELECT session_data FROM sessions WHERE project_id IS NULL ORDER BY timestamp DESC');
+    const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
     res.json({ sessions });
   } catch (error) {
     res.status(500).json({ error: 'Failed to read sessions', details: error.message });
@@ -149,7 +134,6 @@ function rowToProject(r) {
   };
 }
 
-// GET /api/projects?userId=xxx  — list all projects for a user
 app.get('/api/projects', async (req, res) => {
   try {
     const userId = req.query.userId || req.headers['x-user-id'];
@@ -165,7 +149,6 @@ app.get('/api/projects', async (req, res) => {
   }
 });
 
-// GET /api/projects/tracking/:trackingId  — must be before /:id
 app.get('/api/projects/tracking/:trackingId', async (req, res) => {
   try {
     const [rows] = await pool.execute(
@@ -179,7 +162,6 @@ app.get('/api/projects/tracking/:trackingId', async (req, res) => {
   }
 });
 
-// GET /api/projects/:id
 app.get('/api/projects/:id', async (req, res) => {
   try {
     const userId = req.query.userId || req.headers['x-user-id'];
@@ -194,7 +176,6 @@ app.get('/api/projects/:id', async (req, res) => {
   }
 });
 
-// POST /api/projects  — create project directly in TiDB
 app.post('/api/projects', async (req, res) => {
   try {
     const { name, domain, userId } = req.body;
@@ -215,7 +196,6 @@ app.post('/api/projects', async (req, res) => {
       [project.id, project.userId, project.name, project.domain, project.trackingId, project.createdAt]
     );
 
-    console.log('Project created in TiDB:', project.id, project.name);
     res.status(201).json(project);
   } catch (error) {
     console.error('Error creating project:', error);
@@ -223,7 +203,6 @@ app.post('/api/projects', async (req, res) => {
   }
 });
 
-// PUT /api/projects/:id
 app.put('/api/projects/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -251,7 +230,6 @@ app.put('/api/projects/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/projects/:id?userId=xxx
 app.delete('/api/projects/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -265,9 +243,9 @@ app.delete('/api/projects/:id', async (req, res) => {
 
     await pool.execute('DELETE FROM projects WHERE id = ? AND user_id = ?', [id, userId]);
 
-    // Clean up any local event/session files for this project
-    try { await fs.unlink(path.join(projectsDir, `${id}_events.json`)); } catch {}
-    try { await fs.unlink(path.join(projectsDir, `${id}_sessions.json`)); } catch {}
+    // Wipe matching event/session data linked to this deleted project
+    await pool.execute('DELETE FROM events WHERE project_id = ?', [id]);
+    await pool.execute('DELETE FROM sessions WHERE project_id = ?', [id]);
 
     res.json({ success: true });
   } catch (error) {
@@ -281,10 +259,12 @@ app.delete('/api/projects/:id', async (req, res) => {
 app.post('/api/:projectId/events/track', async (req, res) => {
   try {
     const { projectId } = req.params;
-    const eventsFile = path.join(projectsDir, `${projectId}_events.json`);
-    const eventsData = await readJsonFile(eventsFile) || { events: [] };
-    eventsData.events.push({ ...req.body, projectId });
-    await writeJsonFile(eventsFile, eventsData);
+    const eventData = { ...req.body, projectId };
+
+    await pool.execute(
+      'INSERT INTO events (project_id, event_data) VALUES (?, ?)',
+      [projectId, JSON.stringify(eventData)]
+    );
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save event', details: error.message });
@@ -293,8 +273,12 @@ app.post('/api/:projectId/events/track', async (req, res) => {
 
 app.get('/api/:projectId/events', async (req, res) => {
   try {
-    const eventsFile = path.join(projectsDir, `${req.params.projectId}_events.json`);
-    res.json(await readJsonFile(eventsFile) || { events: [] });
+    const [rows] = await pool.execute(
+      'SELECT event_data FROM events WHERE project_id = ? ORDER BY created_at DESC',
+      [req.params.projectId]
+    );
+    const events = rows.map(r => typeof r.event_data === 'string' ? JSON.parse(r.event_data) : r.event_data);
+    res.json({ events });
   } catch (error) {
     res.status(500).json({ error: 'Failed to read events', details: error.message });
   }
@@ -305,12 +289,14 @@ app.get('/api/:projectId/events', async (req, res) => {
 app.post('/api/:projectId/session', async (req, res) => {
   try {
     const { projectId } = req.params;
-    const projectSessionDir = path.join(projectsDir, projectId, 'sessions');
-    await fs.mkdir(projectSessionDir, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    await writeJsonFile(path.join(projectSessionDir, `session_${timestamp}.json`), {
-      ...req.body, projectId, timestamp: new Date().toISOString(), recordedAt: timestamp
-    });
+    const timestamp = new Date().toISOString();
+    const recordedAt = timestamp.replace(/[:.]/g, '-');
+    const sessionData = { ...req.body, projectId, timestamp, recordedAt };
+
+    await pool.execute(
+      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
+      [projectId, JSON.stringify(sessionData), new Date(), recordedAt]
+    );
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save session', details: error.message });
@@ -319,26 +305,30 @@ app.post('/api/:projectId/session', async (req, res) => {
 
 app.get('/api/:projectId/sessions', async (req, res) => {
   try {
-    const projectSessionDir = path.join(projectsDir, req.params.projectId, 'sessions');
-    let files = [];
-    try { files = await fs.readdir(projectSessionDir); } catch { return res.json({ sessions: [] }); }
-    const sessions = (await Promise.all(
-      files.filter(f => f.endsWith('.json')).map(f => readJsonFile(path.join(projectSessionDir, f)))
-    )).filter(Boolean);
-    sessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const [rows] = await pool.execute(
+      'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC',
+      [req.params.projectId]
+    );
+    const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
     res.json({ sessions });
   } catch (error) {
     res.status(500).json({ error: 'Failed to read sessions', details: error.message });
   }
 });
 
-// ============ START ============
+// ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
 
-app.listen(PORT, async () => {
-  try {
-    await initDatabase();
-  } catch (err) {
-    console.error('WARN: TiDB init failed:', err.message);
+let isDbInitialized = false;
+app.use(async (req, res, next) => {
+  if (!isDbInitialized) {
+    try {
+      await initDatabase();
+      isDbInitialized = true;
+    } catch (err) {
+      console.error('WARN: TiDB initialization error:', err.message);
+    }
   }
-  console.log(`Analytics API server running on port ${PORT}`);
+  next();
 });
+
+export default app;
