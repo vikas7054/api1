@@ -1,0 +1,26 @@
+{
+  "name": "hello-world",
+  "version": "1.0.0",
+  "description": "Node.js Express Hello World example",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "build": "npm install && node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.1",
+    "moment": "^2.29.1",
+    "dotenv": "^16.0.3",
+    "uuid": "^9.0.0",
+    "cors": "^2.8.5",
+    "bcryptjs": "^2.4.3",
+    "axios": "^1.6.7",
+     "mysql2": "^3.9.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
