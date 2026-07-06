@@ -330,6 +330,35 @@ app.get('/api/:projectId/sessions', async (req, res) => {
   }
 });
 
+// ============ DELETE ALL PROJECT DATA ============
+
+app.delete('/api/:projectId/data', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    // Delete all events for this project
+    const [eventsResult] = await pool.execute(
+      'DELETE FROM events WHERE project_id = ?',
+      [projectId]
+    );
+
+    // Delete all sessions for this project
+    const [sessionsResult] = await pool.execute(
+      'DELETE FROM sessions WHERE project_id = ?',
+      [projectId]
+    );
+
+    res.json({
+      success: true,
+      deletedEvents: eventsResult.affectedRows,
+      deletedSessions: sessionsResult.affectedRows
+    });
+  } catch (error) {
+    console.error('Error deleting project data:', error);
+    res.status(500).json({ error: 'Failed to delete project data', details: error.message });
+  }
+});
+
 // ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
 
 let isDbInitialized = false;
