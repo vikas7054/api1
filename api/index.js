@@ -67,9 +67,20 @@ async function initDatabase() {
 
 // ============ GLOBAL EVENTS & SESSIONS ============
 
+// Helper to extract real IP from request
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) {
+    const ips = forwarded.split(',').map(ip => ip.trim());
+    return ips[0] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+  }
+  return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+}
+
 app.post('/api/events/track', async (req, res) => {
   try {
-    const event = req.body;
+    const ip = getClientIp(req);
+    const event = { ...req.body, ip };
     await pool.execute(
       'INSERT INTO events (project_id, event_data) VALUES (NULL, ?)',
       [JSON.stringify(event)]
@@ -82,9 +93,10 @@ app.post('/api/events/track', async (req, res) => {
 
 app.post('/api/session', async (req, res) => {
   try {
+    const ip = getClientIp(req);
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
-    const sessionData = { ...req.body, timestamp, recordedAt };
+    const sessionData = { ...req.body, ip, timestamp, recordedAt };
 
     await pool.execute(
       'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (NULL, ?, ?, ?)',
@@ -259,7 +271,8 @@ app.delete('/api/projects/:id', async (req, res) => {
 app.post('/api/:projectId/events/track', async (req, res) => {
   try {
     const { projectId } = req.params;
-    const eventData = { ...req.body, projectId };
+    const ip = getClientIp(req);
+    const eventData = { ...req.body, projectId, ip };
 
     await pool.execute(
       'INSERT INTO events (project_id, event_data) VALUES (?, ?)',
@@ -289,9 +302,10 @@ app.get('/api/:projectId/events', async (req, res) => {
 app.post('/api/:projectId/session', async (req, res) => {
   try {
     const { projectId } = req.params;
+    const ip = getClientIp(req);
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
-    const sessionData = { ...req.body, projectId, timestamp, recordedAt };
+    const sessionData = { ...req.body, projectId, ip, timestamp, recordedAt };
 
     await pool.execute(
       'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
