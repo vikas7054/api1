@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
+import customRouter, { setCustomPool } from './custom.js';
 
 const app = express();
 
@@ -64,6 +65,12 @@ async function initDatabase() {
     conn.release();
   }
 }
+
+// Initialize custom router with pool
+setCustomPool(pool);
+
+// Mount custom API routes
+app.use('/api/custom', customRouter);
 
 // ============ GLOBAL EVENTS & SESSIONS ============
 
@@ -358,28 +365,6 @@ app.delete('/api/:projectId/data', async (req, res) => {
     res.status(500).json({ error: 'Failed to delete project data', details: error.message });
   }
 });
-// ============ DELETE SINGLE SESSION ============
-
-app.delete('/api/:projectId/sessions/:sessionId', async (req, res) => {
-  try {
-    const { projectId, sessionId } = req.params;
-
-    // Delete all session chunks matching this sessionId
-    const [result] = await pool.execute(
-      `DELETE FROM sessions WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ?`,
-      [projectId, sessionId]
-    );
-
-    res.json({
-      success: true,
-      deletedChunks: result.affectedRows
-    });
-  } catch (error) {
-    console.error('Error deleting session:', error);
-    res.status(500).json({ error: 'Failed to delete session', details: error.message });
-  }
-});
-
 
 // ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
 
