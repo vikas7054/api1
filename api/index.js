@@ -284,6 +284,40 @@ app.post('/api/:projectId/events/track', async (req, res) => {
   }
 });
 
+// Batch endpoint for multiple events in a single request
+app.post('/api/:projectId/events/batch', async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const ip = getClientIp(req);
+    const { events = [], visitorId, sessionId, timestamp, ...meta } = req.body;
+
+    if (!events || !Array.isArray(events) || events.length === 0) {
+      return res.status(400).json({ error: 'events array is required' });
+    }
+
+    // Insert all events in batch
+    const insertPromises = events.map(event => {
+      const eventData = {
+        ...meta,
+        ...event,
+        visitorId: visitorId || event.visitorId,
+        sessionId: sessionId || event.sessionId,
+        projectId,
+        ip,
+      };
+      return pool.execute(
+        'INSERT INTO events (project_id, event_data) VALUES (?, ?)',
+        [projectId, JSON.stringify(eventData)]
+      );
+    });
+
+    await Promise.all(insertPromises);
+    res.status(200).json({ success: true, count: events.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save events batch', details: error.message });
+  }
+});
+
 app.get('/api/:projectId/events', async (req, res) => {
   try {
     const [rows] = await pool.execute(
