@@ -330,28 +330,6 @@ app.get('/api/:projectId/sessions', async (req, res) => {
   }
 });
 
-// ============ DELETE SINGLE SESSION ============
-
-app.delete('/api/:projectId/sessions/:sessionId', async (req, res) => {
-  try {
-    const { projectId, sessionId } = req.params;
-
-    // Delete all session chunks matching this sessionId
-    const [result] = await pool.execute(
-      `DELETE FROM sessions WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ?`,
-      [projectId, sessionId]
-    );
-
-    res.json({
-      success: true,
-      deletedChunks: result.affectedRows
-    });
-  } catch (error) {
-    console.error('Error deleting session:', error);
-    res.status(500).json({ error: 'Failed to delete session', details: error.message });
-  }
-});
-
 // ============ DELETE ALL PROJECT DATA ============
 
 app.delete('/api/:projectId/data', async (req, res) => {
