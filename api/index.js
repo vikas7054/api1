@@ -81,6 +81,21 @@ async function initDatabase() {
   }
 }
 
+// ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
+
+let isDbInitialized = false;
+app.use(async (req, res, next) => {
+  if (!isDbInitialized) {
+    try {
+      await initDatabase();
+      isDbInitialized = true;
+    } catch (err) {
+      console.error('WARN: TiDB initialization error:', err.message);
+    }
+  }
+  next();
+});
+
 // ============ GLOBAL EVENTS & SESSIONS ============
 
 // Helper to extract real IP from request
@@ -397,22 +412,7 @@ app.delete('/api/:projectId/data', async (req, res) => {
   }
 });
 
-app.use('/api/custom', customRouter);   // 👈 add this
+app.use('/api/custom', customRouter);
 app.use('/api/usage', usageRouter);
-
-// ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
-
-let isDbInitialized = false;
-app.use(async (req, res, next) => {
-  if (!isDbInitialized) {
-    try {
-      await initDatabase();
-      isDbInitialized = true;
-    } catch (err) {
-      console.error('WARN: TiDB initialization error:', err.message);
-    }
-  }
-  next();
-});
 
 export default app;
