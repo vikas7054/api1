@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
+import customRouter, { setCustomPool } from './custom.js';   // 👈 add this
 
 const app = express();
 
