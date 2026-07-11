@@ -4,6 +4,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import mysql from 'mysql2/promise';
 import customRouter, { setCustomPool } from './custom.js';   // 👈 add this
+import usageRouter, { setUsagePool, initUsageDatabase } from './usage.js';
 
 const app = express();
 
@@ -57,6 +58,20 @@ async function initDatabase() {
         session_data JSON NOT NULL,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         recorded_at VARCHAR(255) NOT NULL
+      )
+    `);
+
+    // 4. User Plans Table (tracks per-user plan and billing cycle)
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS user_plans (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        plan VARCHAR(20) NOT NULL DEFAULT 'free',
+        billing_cycle_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        billing_cycle_end TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL 30 DAY),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_user_id (user_id)
       )
     `);
 
@@ -383,6 +398,7 @@ app.delete('/api/:projectId/data', async (req, res) => {
 });
 
 app.use('/api/custom', customRouter);   // 👈 add this
+app.use('/api/usage', usageRouter);
 
 // ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
 
