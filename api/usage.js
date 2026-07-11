@@ -33,7 +33,7 @@ try {
 
 // Plan definitions with limits
 const PLAN_LIMITS = {
-  free: { events: 10000, sessions: 1000, projects: 3, storage_mb: 500 },
+  free: { events: 100, sessions: 1000, projects: 3, storage_mb: 500 },
   pro: { events: 100000, sessions: 10000, projects: 25, storage_mb: 5000 },
   enterprise: { events: 1000000, sessions: 100000, projects: 100, storage_mb: 50000 },
 };
