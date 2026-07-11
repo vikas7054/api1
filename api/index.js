@@ -382,6 +382,8 @@ app.delete('/api/:projectId/data', async (req, res) => {
   }
 });
 
+app.use('/api/custom', customRouter);   // 👈 add this
+
 // ============ VERCEL SERVERLESS ENGINES INITIALIZATION ============
 
 let isDbInitialized = false;
