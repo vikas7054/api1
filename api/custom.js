@@ -17,6 +17,19 @@ function getClientIp(req) {
   return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
 }
 
+//pool manual 
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
+  port: Number(process.env.DB_PORT) || 4000,
+  user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
+  password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
+  database: process.env.DB_DATABASE || 'test',
+  ssl: { rejectUnauthorized: true },
+  waitForConnections: true,
+  connectionLimit: 10,
+});
+
+setCustomPool(pool);   // 👈 add this, right after pool is created
 // Pool is passed from server.js
 let pool = null;
 
