@@ -49,7 +49,7 @@ export async function initUsageDatabase() {
         user_id VARCHAR(255) NOT NULL,
         plan VARCHAR(20) NOT NULL DEFAULT 'free',
         billing_cycle_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        billing_cycle_end TIMESTAMP DEFAULT DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY),
+        billing_cycle_end TIMESTAMP NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_user_id (user_id)
@@ -76,7 +76,7 @@ async function getOrCreatePlan(userId) {
   const { randomUUID } = await import('crypto');
   const id = randomUUID();
   await pool.execute(
-    'INSERT INTO user_plans (id, user_id, plan) VALUES (?, ?, ?)',
+    'INSERT INTO user_plans (id, user_id, plan, billing_cycle_end) VALUES (?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 30 DAY))',
     [id, userId, 'free']
   );
 
