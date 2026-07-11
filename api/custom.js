@@ -5,7 +5,12 @@
  */
 
 import express from 'express';
+import mysql from 'mysql2/promise'; // Added missing driver import
+
 const customRouter = express.Router();
+
+// Initialize the single pool variable reference
+let pool = null;
 
 // Helper to extract real IP from request
 function getClientIp(req) {
@@ -17,24 +22,25 @@ function getClientIp(req) {
   return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
 }
 
-//pool manual 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
-  port: Number(process.env.DB_PORT) || 4000,
-  user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
-  password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
-  database: process.env.DB_DATABASE || 'test',
-  ssl: { rejectUnauthorized: true },
-  waitForConnections: true,
-  connectionLimit: 10,
-});
-
-setCustomPool(pool);   // 👈 add this, right after pool is created
-// Pool is passed from server.js
-let pool = null;
-
+// Exportable setter function for server.js to pass its pool instance
 export function setCustomPool(mysqlPool) {
   pool = mysqlPool;
+}
+
+// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one
+try {
+  pool = mysql.createPool({
+    host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
+    port: Number(process.env.DB_PORT) || 4000,
+    user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
+    password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
+    database: process.env.DB_DATABASE || 'test',
+    ssl: { rejectUnauthorized: true },
+    waitForConnections: true,
+    connectionLimit: 10,
+  });
+} catch (err) {
+  console.error('Custom API: Standalone fallback database connection failed:', err.message);
 }
 
 // ============ CUSTOM PROJECT-SCOPED EVENTS ============
@@ -89,7 +95,6 @@ customRouter.post('/:projectId/session', async (req, res) => {
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
 
-    // Extract metadata if present (from optimized tracking)
     const { meta, ...sessionData } = req.body;
     const fullSessionData = {
       ...sessionData,
@@ -132,7 +137,7 @@ customRouter.get('/:projectId/sessions', async (req, res) => {
   }
 });
 
-// ============ SESSION BATCH ENDPOINT (for efficient bulk writes) ============
+// ============ SESSION BATCH ENDPOINT ============
 
 customRouter.post('/:projectId/sessions/batch', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
@@ -149,7 +154,6 @@ customRouter.post('/:projectId/sessions/batch', async (req, res) => {
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
 
-    // Batch insert sessions
     const values = sessionBatch.map(session => {
       const sessionData = {
         ...session,
@@ -162,7 +166,6 @@ customRouter.post('/:projectId/sessions/batch', async (req, res) => {
       return [projectId, JSON.stringify(sessionData), new Date(), recordedAt];
     });
 
-    // MySQL batch insert
     await pool.query(
       'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES ?',
       [values]
@@ -190,7 +193,6 @@ customRouter.post('/:projectId/events/batch', async (req, res) => {
 
     const ip = getClientIp(req);
 
-    // Batch insert events
     const values = eventBatch.map(event => {
       const eventData = {
         ...event,
@@ -221,19 +223,16 @@ customRouter.get('/:projectId/stats', async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Get session count
     const [sessionRows] = await pool.execute(
       'SELECT COUNT(*) as count FROM sessions WHERE project_id = ?',
       [projectId]
     );
 
-    // Get event count
     const [eventRows] = await pool.execute(
       'SELECT COUNT(*) as count FROM events WHERE project_id = ?',
       [projectId]
     );
 
-    // Get total session data size (approximate)
     const [sizeRows] = await pool.execute(
       'SELECT SUM(LENGTH(session_data)) as totalSize FROM sessions WHERE project_id = ?',
       [projectId]
@@ -260,17 +259,14 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
     const { projectId } = req.params;
     const olderThanDays = parseInt(req.query.days) || 30;
 
-    // Calculate cutoff date
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - olderThanDays);
 
-    // Delete old sessions
     const [sessionsResult] = await pool.execute(
       'DELETE FROM sessions WHERE project_id = ? AND timestamp < ?',
       [projectId, cutoff]
     );
 
-    // Delete old events
     const [eventsResult] = await pool.execute(
       'DELETE FROM events WHERE project_id = ? AND created_at < ?',
       [projectId, cutoff]
