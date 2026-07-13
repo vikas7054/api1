@@ -286,8 +286,16 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
-const DEFAULT_TRACKING_SCRIPT = `  hbehdheddd
-// Usage: Initialize with window.AnalyticsTracker.init(projectId) or set window.ANALYTICS_PROJECT_ID before loading
+const DEFAULT_TRACKING_SCRIPT = `// Custom Web Analytics Tracking Script
+// This is the default template. It is served per-project from:
+//   GET  /api/custom/:projectId/tracking.js        -> returns JS (for <script src>)
+//   GET  /api/custom/:projectId/tracking-script   -> returns JSON { scriptContent, updatedAt }
+//   PUT  /api/custom/:projectId/tracking-script   -> saves updated script
+//   POST /api/custom/:projectId/tracking-script/reset -> resets to this default
+//
+// Usage on your site:
+//   <script src="https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js"></script>
+//   <script src="https://api1-orpin.vercel.app/api/custom/YOUR_PROJECT_ID/tracking.js" defer></script>
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   let events = [];
