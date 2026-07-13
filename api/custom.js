@@ -286,18 +286,10 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
-const DEFAULT_TRACKING_SCRIPT = `// Custom Web Analytics Tracking Script
-// This is the default template. It is served per-project from:
-//   GET  /api/custom/:projectId/tracking.js        -> returns JS (for <script src>)
-//   GET  /api/custom/:projectId/tracking-script   -> returns JSON { scriptContent, updatedAt }
-//   PUT  /api/custom/:projectId/tracking-script   -> saves updated script
-//   POST /api/custom/:projectId/tracking-script/reset -> resets to this default
-//
-// Usage on your site:
-//   <script src="https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js"></script>
-//   <script src="https://api1-orpin.vercel.app/api/custom/YOUR_PROJECT_ID/tracking.js" defer></script>
+const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
+// Usage: Initialize with window.AnalyticsTracker.init(projectId) or set window.ANALYTICS_PROJECT_ID before loading
 (function() {
-  const API_URL = 'https://api1-orpin.vercel.app/api/custom1';
+  const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   let events = [];
   let recording = false;
   let stopFn = null;
@@ -316,19 +308,8 @@ const DEFAULT_TRACKING_SCRIPT = `// Custom Web Analytics Tracking Script
     if (projectId) return projectId;
     if (window.ANALYTICS_PROJECT_ID) {
       projectId = window.ANALYTICS_PROJECT_ID;
-      return projectId;
     }
-    // Auto-extract from the script's own src URL: /api/custom/{projectId}/tracking.js
-    var scripts = document.getElementsByTagName('script');
-    for (var i = 0; i < scripts.length; i++) {
-      var src = scripts[i].src || '';
-      var match = src.match(/\\/api\\/custom\\/([0-9a-fA-F-]{36})\\/tracking\\.js/);
-      if (match) {
-        projectId = match[1];
-        return projectId;
-      }
-    }
-    return null;
+    return projectId;
   }
 
   function getVisitorId() {
@@ -476,23 +457,13 @@ const DEFAULT_TRACKING_SCRIPT = `// Custom Web Analytics Tracking Script
     });
   }
 
-  // Auto-init: use window.ANALYTICS_PROJECT_ID if set, otherwise auto-detect from script src URL
-  (function autoInit() {
-    var pId = getProjectId();
-    if (pId) {
-      if (document.readyState === 'complete') {
-        init(pId);
-      } else {
-        window.addEventListener('load', function() { init(pId); });
-      }
-    } else if (document.readyState !== 'complete') {
-      // Script may load before DOM is ready; retry once on load
-      window.addEventListener('load', function() {
-        var retryId = getProjectId();
-        if (retryId) init(retryId);
-      });
+  if (window.ANALYTICS_PROJECT_ID) {
+    if (document.readyState === 'complete') {
+      init(window.ANALYTICS_PROJECT_ID);
+    } else {
+      window.addEventListener('load', function() { init(window.ANALYTICS_PROJECT_ID); });
     }
-  })();
+  }
 
   window.trackEvent = trackEvent;
   window.AnalyticsTracker = {
