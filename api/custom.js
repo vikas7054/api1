@@ -286,7 +286,7 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
-const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
+const DEFAULT_TRACKING_SCRIPT = `  hbehdheddd
 // Usage: Initialize with window.AnalyticsTracker.init(projectId) or set window.ANALYTICS_PROJECT_ID before loading
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
