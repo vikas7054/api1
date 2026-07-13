@@ -297,7 +297,7 @@ const DEFAULT_TRACKING_SCRIPT = `// Custom Web Analytics Tracking Script
 //   <script src="https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js"></script>
 //   <script src="https://api1-orpin.vercel.app/api/custom/YOUR_PROJECT_ID/tracking.js" defer></script>
 (function() {
-  const API_URL = 'https://api1-orpin.vercel.app/api/custom';
+  const API_URL = 'https://api1-orpin.vercel.app/api/custom1';
   let events = [];
   let recording = false;
   let stopFn = null;
