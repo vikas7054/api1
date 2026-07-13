@@ -75,15 +75,24 @@ async function initDatabase() {
       )
     `);
 
-    // 5. Tracking Scripts Table (custom per-project tracking script)
+    // 5. Tracking Scripts Table (custom per-project tracking script + settings)
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS tracking_scripts (
         project_id VARCHAR(36) PRIMARY KEY,
         script_content LONGTEXT NOT NULL,
+        settings JSON NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Add settings column if it doesn't exist (for existing tables)
+    try {
+      const [cols] = await conn.execute("SHOW COLUMNS FROM tracking_scripts LIKE 'settings'");
+      if (cols.length === 0) {
+        await conn.execute("ALTER TABLE tracking_scripts ADD COLUMN settings JSON NULL AFTER script_content");
+      }
+    } catch (e) { /* column might already exist */ }
 
     console.log('TiDB: All database tables verified and ready');
   } finally {
