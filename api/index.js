@@ -75,6 +75,16 @@ async function initDatabase() {
       )
     `);
 
+    // 5. Tracking Scripts Table (custom per-project tracking script)
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS tracking_scripts (
+        project_id VARCHAR(36) PRIMARY KEY,
+        script_content LONGTEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     console.log('TiDB: All database tables verified and ready');
   } finally {
     conn.release();
