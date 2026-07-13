@@ -287,10 +287,9 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
 const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
-// Single-tag install — auto-detects project ID from the script URL and auto-loads rrweb:
+// Single-tag install — server injects the project ID automatically:
 //   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
-// You can still override by setting window.ANALYTICS_PROJECT_ID before loading,
-// or by calling window.AnalyticsTracker.init('PROJECT_ID').
+// You can still override by calling window.AnalyticsTracker.init('PROJECT_ID').
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
@@ -298,7 +297,7 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
   let recording = false;
   let stopFn = null;
   let sendInterval = null;
-  let projectId = null;
+  let projectId = '__PROJECT_ID__';
   let rrwebLoading = false;
   let rrwebCallbacks = [];
 
@@ -308,18 +307,6 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
       const v = c === 'x' ? r : (r & 0x3 | 0x8);
       return v.toString(16);
     });
-  }
-
-  // Auto-detect project ID from the script's own src URL.
-  // Works for: /api/custom/PROJECT_ID/tracking.js
-  function detectProjectIdFromScript() {
-    var scripts = document.getElementsByTagName('script');
-    for (var i = scripts.length - 1; i >= 0; i--) {
-      var src = scripts[i].src || '';
-      var match = src.match(/\\/api\\/custom\\/([^\\/?#]+)\\/tracking\\.js/);
-      if (match) return decodeURIComponent(match[1]);
-    }
-    return null;
   }
 
   // Auto-load rrweb if not already present, then call callback.
@@ -339,13 +326,6 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
   }
 
   function getProjectId() {
-    if (projectId) return projectId;
-    if (window.ANALYTICS_PROJECT_ID) {
-      projectId = window.ANALYTICS_PROJECT_ID;
-    }
-    if (!projectId) {
-      projectId = detectProjectIdFromScript();
-    }
     return projectId;
   }
 
@@ -496,13 +476,12 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     });
   }
 
-  // Auto-init: detect project ID from script src or window.ANALYTICS_PROJECT_ID
-  var autoProjectId = window.ANALYTICS_PROJECT_ID || detectProjectIdFromScript();
-  if (autoProjectId) {
+  // Auto-init: project ID is already injected server-side
+  if (projectId) {
     if (document.readyState === 'complete') {
-      init(autoProjectId);
+      init(projectId);
     } else {
-      window.addEventListener('load', function() { init(autoProjectId); });
+      window.addEventListener('load', function() { init(projectId); });
     }
   }
 
@@ -539,6 +518,9 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
         [projectId, scriptContent]
       );
     }
+
+    // Inject the real project ID server-side so the client doesn't need to detect it
+    scriptContent = scriptContent.replace(/__PROJECT_ID__/g, projectId);
 
     res.set('Content-Type', 'application/javascript');
     res.set('Cache-Control', 'public, max-age=60');
