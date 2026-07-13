@@ -287,7 +287,11 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
 const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
-// Usage: Initialize with window.AnalyticsTracker.init(projectId) or set window.ANALYTICS_PROJECT_ID before loading
+// Auto-detects the project ID from this script's own <script src> URL.
+// No need to set window.ANALYTICS_PROJECT_ID — just include the script tag:
+//   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
+// You can still override by setting window.ANALYTICS_PROJECT_ID before loading,
+// or by calling window.AnalyticsTracker.init('PROJECT_ID').
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   let events = [];
@@ -304,10 +308,25 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     });
   }
 
+  // Auto-detect project ID from the script's own src URL.
+  // Works for: /api/custom/PROJECT_ID/tracking.js
+  function detectProjectIdFromScript() {
+    var scripts = document.getElementsByTagName('script');
+    for (var i = scripts.length - 1; i >= 0; i--) {
+      var src = scripts[i].src || '';
+      var match = src.match(/\/api\/custom\/([^/\?#]+)\/tracking\.js/);
+      if (match) return decodeURIComponent(match[1]);
+    }
+    return null;
+  }
+
   function getProjectId() {
     if (projectId) return projectId;
     if (window.ANALYTICS_PROJECT_ID) {
       projectId = window.ANALYTICS_PROJECT_ID;
+    }
+    if (!projectId) {
+      projectId = detectProjectIdFromScript();
     }
     return projectId;
   }
@@ -457,11 +476,13 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     });
   }
 
-  if (window.ANALYTICS_PROJECT_ID) {
+  // Auto-init: detect project ID from script src or window.ANALYTICS_PROJECT_ID
+  var autoProjectId = window.ANALYTICS_PROJECT_ID || detectProjectIdFromScript();
+  if (autoProjectId) {
     if (document.readyState === 'complete') {
-      init(window.ANALYTICS_PROJECT_ID);
+      init(autoProjectId);
     } else {
-      window.addEventListener('load', function() { init(window.ANALYTICS_PROJECT_ID); });
+      window.addEventListener('load', function() { init(autoProjectId); });
     }
   }
 
