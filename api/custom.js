@@ -287,18 +287,20 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
 const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
-// Auto-detects the project ID from this script's own <script src> URL.
-// No need to set window.ANALYTICS_PROJECT_ID — just include the script tag:
+// Single-tag install — auto-detects project ID from the script URL and auto-loads rrweb:
 //   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
 // You can still override by setting window.ANALYTICS_PROJECT_ID before loading,
 // or by calling window.AnalyticsTracker.init('PROJECT_ID').
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
+  const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
   let events = [];
   let recording = false;
   let stopFn = null;
   let sendInterval = null;
   let projectId = null;
+  let rrwebLoading = false;
+  let rrwebCallbacks = [];
 
   function generateId() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -314,10 +316,26 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     var scripts = document.getElementsByTagName('script');
     for (var i = scripts.length - 1; i >= 0; i--) {
       var src = scripts[i].src || '';
-      var match = src.match(/\/api\/custom\/([^/\?#]+)\/tracking\.js/);
+      var match = src.match(/\\/api\\/custom\\/([^\\/?#]+)\\/tracking\\.js/);
       if (match) return decodeURIComponent(match[1]);
     }
     return null;
+  }
+
+  // Auto-load rrweb if not already present, then call callback.
+  function ensureRrwebLoaded(callback) {
+    if (typeof rrweb !== 'undefined') { callback(); return; }
+    rrwebCallbacks.push(callback);
+    if (rrwebLoading) return;
+    rrwebLoading = true;
+    var s = document.createElement('script');
+    s.src = RRWEB_URL;
+    s.onload = function() {
+      rrwebCallbacks.forEach(function(cb) { cb(); });
+      rrwebCallbacks = [];
+    };
+    s.onerror = function() { console.warn('Analytics: Failed to load rrweb'); };
+    document.head.appendChild(s);
   }
 
   function getProjectId() {
@@ -453,11 +471,13 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
   function init(pId) {
     projectId = pId;
 
-    if (document.readyState === 'complete') {
-      startRecording();
-    } else {
-      window.addEventListener('load', startRecording);
-    }
+    ensureRrwebLoaded(function() {
+      if (document.readyState === 'complete') {
+        startRecording();
+      } else {
+        window.addEventListener('load', startRecording);
+      }
+    });
 
     trackEvent('pageview');
 
