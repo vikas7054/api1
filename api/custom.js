@@ -286,13 +286,45 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
-const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
+const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
+//
+// HOW TO TURN THINGS ON/OFF:
+// Just edit the CONFIG object below. No dashboard, no HTML needed.
+//   rrwebRecording: true  -> session replay recording auto-starts (default)
+//   rrwebRecording: false -> session replay never starts, nothing sent for it
+//   eventTracking:  true  -> pageview/click/custom events send to API (default)
+//   eventTracking:  false -> events are blocked locally, nothing sent
+//   autoClicks:     true  -> clicks are tracked automatically (default)
+//   autoClicks:     false -> clicks are not tracked
+//
+// These same 3 switches can ALSO be controlled at runtime from your own code:
+//   window.AnalyticsTracker.stopSession() / startSession()
+//   window.AnalyticsTracker.disableEvents() / enableEvents()
+//   window.AnalyticsTracker.disableAutoClicks() / enableAutoClicks()
+//
 // Single-tag install — server injects the project ID automatically:
 //   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
-// You can still override by calling window.AnalyticsTracker.init('PROJECT_ID').
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
+
+  // ---- EDIT THESE TO SET DEFAULTS FOR THIS PROJECT ----
+  const CONFIG = {
+    rrwebRecording: true,   // session replay recording — ON
+    eventTracking: true,    // pageview / click / custom events — on by default
+    autoClicks: true,       // automatic click capture — on by default
+    inactivityTimeoutMinutes: 5, // after this many minutes with no interaction, stop sending;
+                                  // a new session ID is issued when the user comes back.
+                                  // Set to false (or 0) to turn this off completely —
+                                  // script then behaves exactly like before, no timeout at all.
+    mouseMoveSampling: 20   // ms between recorded mouse positions.
+                            // Lower (e.g. 20) = smoother replay, more data sent.
+                            // Higher (e.g. 300-500) = choppier replay, less data sent.
+                            // Set very high (e.g. 999999) to basically only capture clicks,
+                            // not continuous movement.
+  };
+  // -------------------------------------------------------
+
   let events = [];
   let recording = false;
   let stopFn = null;
@@ -300,6 +332,12 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
   let projectId = '__PROJECT_ID__';
   let rrwebLoading = false;
   let rrwebCallbacks = [];
+  let autoClicksEnabled = false;
+  let clickHandler = null;
+  let eventsOn = CONFIG.eventTracking;
+  let lastActivityTime = Date.now();
+  let isInactive = false;
+  let inactivityCheckInterval = null;
 
   function generateId() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -309,7 +347,6 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     });
   }
 
-  // Auto-load rrweb if not already present, then call callback.
   function ensureRrwebLoaded(callback) {
     if (typeof rrweb !== 'undefined') { callback(); return; }
     rrwebCallbacks.push(callback);
@@ -325,9 +362,7 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     document.head.appendChild(s);
   }
 
-  function getProjectId() {
-    return projectId;
-  }
+  function getProjectId() { return projectId; }
 
   function getVisitorId() {
     let visitorId = localStorage.getItem('visitorId');
@@ -347,51 +382,89 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     return sessionId;
   }
 
-  function startRecording() {
-    if (recording || typeof rrweb === 'undefined' || !getProjectId()) return;
+  // ---- Inactivity handling ----
+  // If there's no interaction for CONFIG.inactivityTimeoutMinutes, stop sending
+  // data to the API and drop whatever's buffered. When the user interacts again,
+  // a brand new session ID is issued — nothing after resuming uses the old one.
+  function startNewSessionAfterInactivity() {
+    const newId = generateId();
+    sessionStorage.setItem('sessionId', newId);
+    events = []; // discard anything buffered from before the gap, it's stale
 
-    stopFn = rrweb.record({
-      emit(event) {
-        events.push(event);
-        if (events.length >= 10) {
-          sendEvents();
-        }
-      },
-      recordCanvas: true,
-      recordAfter: 'DOMContentLoaded',
-      maskAllInputs: false,
-      maskTextSelector: '[data-mask]',
-      slimDOMOptions: {
-        script: true,
-        comment: true,
-        headFavicon: true,
-        headWhitespace: true,
-      },
-      sampling: {
-        canvas: 10,
-        input: 'last',
-        scroll: 150,
-        media: 500
-      },
-      dataURLOptions: {
-        type: 'image/webp',
-        quality: 0.8
-      },
-      inlineStylesheet: true
+    // rrweb only records a full DOM snapshot once, at the moment recording starts.
+    // Everything after that is incremental diffs. Since the recorder itself never
+    // stopped while inactive, the new session needs its own full snapshot as the
+    // first event, or the player has nothing to reconstruct the page from.
+    if (recording && typeof rrweb !== 'undefined' && rrweb.record && typeof rrweb.record.takeFullSnapshot === 'function') {
+      rrweb.record.takeFullSnapshot();
+    }
+  }
+
+  function handleActivity() {
+    if (isInactive) {
+      isInactive = false;
+      startNewSessionAfterInactivity();
+    }
+    lastActivityTime = Date.now();
+  }
+
+  function checkInactivity() {
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled, do nothing
+    if (isInactive) return;
+    const timeoutMs = CONFIG.inactivityTimeoutMinutes * 60 * 1000;
+    if (Date.now() - lastActivityTime >= timeoutMs) {
+      isInactive = true;
+      events = []; // stop carrying stale buffered data forward
+    }
+  }
+
+  function startInactivityWatcher() {
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled — old behavior, no watcher at all
+    ['mousemove', 'keydown', 'scroll', 'click', 'touchstart'].forEach(function(evt) {
+      document.addEventListener(evt, handleActivity, { passive: true });
     });
+    if (inactivityCheckInterval) clearInterval(inactivityCheckInterval);
+    inactivityCheckInterval = setInterval(checkInactivity, 30000); // check every 30s
+  }
 
-    recording = true;
+  // ---- Session recording (rrweb) ----
+  function startRecording() {
+    if (recording || !getProjectId()) return;
 
-    if (sendInterval) clearInterval(sendInterval);
-    sendInterval = setInterval(sendEvents, 5000);
+    ensureRrwebLoaded(function() {
+      if (recording) return;
 
-    window.addEventListener('beforeunload', () => {
+      stopFn = rrweb.record({
+        emit(event) {
+          events.push(event);
+          if (events.length >= 10) sendEvents();
+        },
+        recordCanvas: true,
+        recordAfter: 'DOMContentLoaded',
+        maskAllInputs: false,
+        maskTextSelector: '[data-mask]',
+        slimDOMOptions: { script: true, comment: true, headFavicon: true, headWhitespace: true },
+        sampling: { canvas: 10, input: 'last', scroll: 150, media: 500, mousemove: CONFIG.mouseMoveSampling },
+        dataURLOptions: { type: 'image/webp', quality: 0.8 },
+        inlineStylesheet: true
+      });
+
+      recording = true;
       if (sendInterval) clearInterval(sendInterval);
-      sendEvents();
+      sendInterval = setInterval(sendEvents, 5000);
     });
   }
 
+  function stopRecording() {
+    if (!recording) return;
+    if (typeof stopFn === 'function') { stopFn(); stopFn = null; }
+    if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
+    recording = false;
+    sendEvents(); // flush what's left
+  }
+
   async function sendEvents() {
+    if (isInactive) return; // paused — user inactive past the timeout
     if (events.length === 0 || !getProjectId()) return;
 
     const eventsToSend = events.splice(0, events.length);
@@ -420,7 +493,13 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     }
   }
 
+  // ---- Events (pageview / click / custom) ----
   function trackEvent(eventName, eventData) {
+    if (isInactive) return; // paused — user inactive past the timeout
+    if (!eventsOn) {
+      console.warn('Analytics: eventTracking is OFF (CONFIG.eventTracking / disableEvents()) — "' + eventName + '" was NOT sent.');
+      return;
+    }
     if (!getProjectId()) {
       console.warn('Analytics: No project ID configured.');
       return;
@@ -448,35 +527,72 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     }).catch(console.error);
   }
 
-  function init(pId) {
-    projectId = pId;
+  function trackPageview() { trackEvent('pageview'); }
 
-    ensureRrwebLoaded(function() {
-      if (document.readyState === 'complete') {
-        startRecording();
-      } else {
-        window.addEventListener('load', startRecording);
-      }
-    });
-
-    trackEvent('pageview');
-
-    document.addEventListener('click', function(e) {
-      var target = e.target.closest('a, button');
-      if (target) {
-        trackEvent('click', {
-          elementType: target.tagName.toLowerCase(),
-          elementText: target.textContent ? target.textContent.trim() : '',
-          elementId: target.id,
-          elementClass: target.className,
-          clickX: e.clientX,
-          clickY: e.clientY
-        });
-      }
-    });
+  function handleClick(e) {
+    var target = e.target.closest('a, button');
+    if (target) {
+      trackEvent('click', {
+        elementType: target.tagName.toLowerCase(),
+        elementText: target.textContent ? target.textContent.trim() : '',
+        elementId: target.id,
+        elementClass: target.className,
+        clickX: e.clientX,
+        clickY: e.clientY
+      });
+    }
   }
 
-  // Auto-init: project ID is already injected server-side
+  function enableAutoClicks() {
+    if (autoClicksEnabled) return;
+    clickHandler = handleClick;
+    document.addEventListener('click', clickHandler);
+    autoClicksEnabled = true;
+  }
+
+  function disableAutoClicks() {
+    if (!autoClicksEnabled) return;
+    document.removeEventListener('click', clickHandler);
+    clickHandler = null;
+    autoClicksEnabled = false;
+  }
+
+  function enableEvents() { eventsOn = true; }
+  function disableEvents() { eventsOn = false; }
+
+  // Mouse tracking presets. rrweb's sampling rate is locked in when recording
+  // starts, so switching it means restarting the recorder (which also takes
+  // a fresh full snapshot, same as the inactivity-resume flow above).
+  function setMouseTrackingSmooth() {
+    CONFIG.mouseMoveSampling = 20;
+    if (recording) { stopRecording(); startRecording(); }
+  }
+
+  function setMouseTrackingLight() {
+    CONFIG.mouseMoveSampling = 500;
+    if (recording) { stopRecording(); startRecording(); }
+  }
+
+  function setProjectId(pId) { projectId = pId; }
+
+  function init(pId) {
+    if (pId) projectId = pId;
+
+    startInactivityWatcher();
+
+    if (CONFIG.rrwebRecording) startRecording();
+    if (CONFIG.eventTracking) trackPageview();
+    if (CONFIG.autoClicks) enableAutoClicks();
+  }
+
+  window.addEventListener('beforeunload', () => {
+    if (recording) {
+      if (sendInterval) clearInterval(sendInterval);
+      sendEvents();
+    }
+  });
+
+  // Auto-init: project ID is already injected server-side.
   if (projectId) {
     if (document.readyState === 'complete') {
       init(projectId);
@@ -485,10 +601,70 @@ const DEFAULT_TRACKING_SCRIPT = `// Web Analytics Tracking Script
     }
   }
 
+  // ============================================================
+  // EXAMPLE: custom events — DISABLED by default, just a template.
+  // Everything below is commented out, so none of it runs on its own.
+  // Each example is wired to a REAL element with addEventListener, so if
+  // you uncomment one, give the matching id="..." to your actual HTML
+  // element and it will just work — no page-load misfires.
+  // ============================================================
+  //
+  // Track a custom event with optional data (call this from anywhere
+  // in your own code, at the exact moment you want it to fire):
+  // trackEvent('event_name', {
+  //   category: 'category',
+  //   label: 'label',
+  //   value: 123
+  // });
+  //
+  // Form Submissions — put id="contact-form" on your <form>
+  // document.getElementById('contact-form')?.addEventListener('submit', function() {
+  //   trackEvent('form_submit', {
+  //     formId: 'contact',
+  //     success: true
+  //   });
+  // });
+  //
+  // Feature Usage — put id="search-input" on your search box, fires after Enter
+  // document.getElementById('search-input')?.addEventListener('keydown', function(e) {
+  //   if (e.key === 'Enter') {
+  //     trackEvent('feature_used', {
+  //       feature: 'search',
+  //       query: e.target.value
+  //     });
+  //   }
+  // });
+  //
+  // CTA Clicks — put id="signup-hero-btn" on your button/link
+  // document.getElementById('signup-hero-btn')?.addEventListener('click', function() {
+  //   trackEvent('cta_click', {
+  //     ctaId: 'signup-hero',
+  //     location: 'header'
+  //   });
+  // });
+  //
+  // ============================================================
+
+  // Runtime control, in case you want to flip things without editing CONFIG.
   window.trackEvent = trackEvent;
   window.AnalyticsTracker = {
     init: init,
+    setProjectId: setProjectId,
+    startSession: startRecording,
+    stopSession: stopRecording,
+    isRecording: function() { return recording; },
+    enableEvents: enableEvents,
+    disableEvents: disableEvents,
+    isEventsOn: function() { return eventsOn; },
     trackEvent: trackEvent,
+    trackPageview: trackPageview,
+    enableAutoClicks: enableAutoClicks,
+    disableAutoClicks: disableAutoClicks,
+    isAutoClicksEnabled: function() { return autoClicksEnabled; },
+    isInactive: function() { return isInactive; },
+    getLastActivityTime: function() { return lastActivityTime; },
+    setMouseTrackingSmooth: setMouseTrackingSmooth,
+    setMouseTrackingLight: setMouseTrackingLight,
     getProjectId: getProjectId,
     getVisitorId: getVisitorId,
     getSessionId: getSessionId
