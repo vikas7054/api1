@@ -39,7 +39,7 @@ try {
   console.error('Custom API: Standalone fallback database connection failed:', err.message);
 }
 
-// ===== HELPER: parse data from either POST body or GET query =====
+// Parse data from GET query or POST body
 function extractData(req) {
   if (req.method === 'GET') {
     try {
@@ -53,7 +53,6 @@ function extractData(req) {
 
 // ============ CUSTOM PROJECT-SCOPED EVENTS ============
 
-// Accept both POST and GET
 customRouter.all('/:projectId/events/track', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
@@ -70,7 +69,6 @@ customRouter.all('/:projectId/events/track', async (req, res) => {
       [projectId, JSON.stringify(fullData)]
     );
 
-    // For GET (prefetch), return a tiny response so the browser is happy
     if (req.method === 'GET') {
       res.set('Content-Type', 'text/plain');
       return res.status(200).send('ok');
@@ -104,7 +102,6 @@ customRouter.get('/:projectId/events', async (req, res) => {
 
 // ============ CUSTOM PROJECT-SCOPED SESSIONS ============
 
-// Accept both POST and GET
 customRouter.all('/:projectId/session', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
@@ -145,10 +142,12 @@ customRouter.all('/:projectId/session', async (req, res) => {
 
 customRouter.get('/:projectId/sessions', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
   try {
     const { projectId } = req.params;
     const limit = parseInt(req.query.limit) || 50;
     const offset = parseInt(req.query.offset) || 0;
+
     const [rows] = await pool.execute(
       'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?',
       [projectId, limit, offset]
@@ -161,22 +160,40 @@ customRouter.get('/:projectId/sessions', async (req, res) => {
   }
 });
 
+// ============ SESSION BATCH ENDPOINT ============
+
 customRouter.post('/:projectId/sessions/batch', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
   try {
     const { projectId } = req.params;
     const { sessions: sessionBatch } = req.body;
+
     if (!Array.isArray(sessionBatch) || sessionBatch.length === 0) {
       return res.status(400).json({ error: 'sessions array is required' });
     }
+
     const ip = getClientIp(req);
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
+
     const values = sessionBatch.map(session => {
-      const sessionData = { ...session, projectId, ip, timestamp, recordedAt, recordedVia: 'custom-batch' };
+      const sessionData = {
+        ...session,
+        projectId,
+        ip,
+        timestamp,
+        recordedAt,
+        recordedVia: 'custom-batch'
+      };
       return [projectId, JSON.stringify(sessionData), new Date(), recordedAt];
     });
-    await pool.query('INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES ?', [values]);
+
+    await pool.query(
+      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES ?',
+      [values]
+    );
+
     res.status(200).json({ success: true, recorded: sessionBatch.length });
   } catch (error) {
     console.error('Custom API: Batch session error:', error.message);
@@ -184,20 +201,36 @@ customRouter.post('/:projectId/sessions/batch', async (req, res) => {
   }
 });
 
+// ============ EVENTS BATCH ENDPOINT ============
+
 customRouter.post('/:projectId/events/batch', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
   try {
     const { projectId } = req.params;
     const { events: eventBatch } = req.body;
+
     if (!Array.isArray(eventBatch) || eventBatch.length === 0) {
       return res.status(400).json({ error: 'events array is required' });
     }
+
     const ip = getClientIp(req);
+
     const values = eventBatch.map(event => {
-      const eventData = { ...event, projectId, ip, recordedVia: 'custom-batch' };
+      const eventData = {
+        ...event,
+        projectId,
+        ip,
+        recordedVia: 'custom-batch'
+      };
       return [projectId, JSON.stringify(eventData)];
     });
-    await pool.query('INSERT INTO events (project_id, event_data) VALUES ?', [values]);
+
+    await pool.query(
+      'INSERT INTO events (project_id, event_data) VALUES ?',
+      [values]
+    );
+
     res.status(200).json({ success: true, recorded: eventBatch.length });
   } catch (error) {
     console.error('Custom API: Batch events error:', error.message);
@@ -205,10 +238,76 @@ customRouter.post('/:projectId/events/batch', async (req, res) => {
   }
 });
 
-customRouter.get('/:projectId/stats', async (req, res) => { /* unchanged */ });
-customRouter.delete('/:projectId/prune', async (req, res) => { /* unchanged */ });
+// ============ SESSION STATS ============
 
-// ============ CSP-BYPASS TRACKING SCRIPT ============
+customRouter.get('/:projectId/stats', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId } = req.params;
+
+    const [sessionRows] = await pool.execute(
+      'SELECT COUNT(*) as count FROM sessions WHERE project_id = ?',
+      [projectId]
+    );
+
+    const [eventRows] = await pool.execute(
+      'SELECT COUNT(*) as count FROM events WHERE project_id = ?',
+      [projectId]
+    );
+
+    const [sizeRows] = await pool.execute(
+      'SELECT SUM(LENGTH(session_data)) as totalSize FROM sessions WHERE project_id = ?',
+      [projectId]
+    );
+
+    res.json({
+      projectId,
+      sessions: sessionRows[0]?.count || 0,
+      events: eventRows[0]?.count || 0,
+      totalDataSize: sizeRows[0]?.totalSize || 0
+    });
+  } catch (error) {
+    console.error('Custom API: Stats error:', error.message);
+    res.status(500).json({ error: 'Failed to get stats', details: error.message });
+  }
+});
+
+// ============ PRUNE OLD DATA ============
+
+customRouter.delete('/:projectId/prune', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId } = req.params;
+    const olderThanDays = parseInt(req.query.days) || 30;
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - olderThanDays);
+
+    const [sessionsResult] = await pool.execute(
+      'DELETE FROM sessions WHERE project_id = ? AND timestamp < ?',
+      [projectId, cutoff]
+    );
+
+    const [eventsResult] = await pool.execute(
+      'DELETE FROM events WHERE project_id = ? AND created_at < ?',
+      [projectId, cutoff]
+    );
+
+    res.json({
+      success: true,
+      prunedSessions: sessionsResult.affectedRows,
+      prunedEvents: eventsResult.affectedRows,
+      olderThanDays
+    });
+  } catch (error) {
+    console.error('Custom API: Prune error:', error.message);
+    res.status(500).json({ error: 'Failed to prune data', details: error.message });
+  }
+});
+
+// ============ CSP-BYPASS TRACKING SCRIPT (per project) ============
 
 const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via prefetch
 (function() {
@@ -421,8 +520,7 @@ const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via p
   };
 })();`;
 
-// ============ TRACKING SCRIPT ENDPOINTS ============
-
+// GET /:projectId/tracking.js — serve the custom tracking script as JS
 customRouter.get('/:projectId/tracking.js', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
@@ -456,8 +554,83 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
   }
 });
 
-customRouter.get('/:projectId/tracking-script', async (req, res) => { /* same as original */ });
-customRouter.put('/:projectId/tracking-script', async (req, res) => { /* same as original */ });
-customRouter.post('/:projectId/tracking-script/reset', async (req, res) => { /* same as original */ });
+// GET /:projectId/tracking-script — return script as JSON (for editor)
+customRouter.get('/:projectId/tracking-script', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId } = req.params;
+
+    const [rows] = await pool.execute(
+      'SELECT script_content, updated_at FROM tracking_scripts WHERE project_id = ?',
+      [projectId]
+    );
+
+    let scriptContent;
+    let updatedAt = null;
+    if (rows.length > 0) {
+      scriptContent = rows[0].script_content;
+      updatedAt = rows[0].updated_at;
+    } else {
+      scriptContent = CSP_BYPASS_SCRIPT;
+      await pool.execute(
+        'INSERT INTO tracking_scripts (project_id, script_content) VALUES (?, ?)',
+        [projectId, scriptContent]
+      );
+    }
+
+    res.json({ projectId, scriptContent, updatedAt });
+  } catch (error) {
+    console.error('Custom API: Get tracking script (JSON) error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch tracking script', details: error.message });
+  }
+});
+
+// PUT /:projectId/tracking-script — save/update the custom tracking script
+customRouter.put('/:projectId/tracking-script', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId } = req.params;
+    const { scriptContent } = req.body;
+
+    if (!scriptContent || typeof scriptContent !== 'string') {
+      return res.status(400).json({ error: 'scriptContent is required' });
+    }
+
+    await pool.execute(
+      `INSERT INTO tracking_scripts (project_id, script_content)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE script_content = VALUES(script_content)`,
+      [projectId, scriptContent]
+    );
+
+    res.json({ success: true, projectId, message: 'Tracking script updated' });
+  } catch (error) {
+    console.error('Custom API: Save tracking script error:', error.message);
+    res.status(500).json({ error: 'Failed to save tracking script', details: error.message });
+  }
+});
+
+// POST /:projectId/tracking-script/reset — reset to default
+customRouter.post('/:projectId/tracking-script/reset', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId } = req.params;
+
+    await pool.execute(
+      `INSERT INTO tracking_scripts (project_id, script_content)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE script_content = VALUES(script_content)`,
+      [projectId, CSP_BYPASS_SCRIPT]
+    );
+
+    res.json({ success: true, projectId, scriptContent: CSP_BYPASS_SCRIPT, message: 'Tracking script reset to default' });
+  } catch (error) {
+    console.error('Custom API: Reset tracking script error:', error.message);
+    res.status(500).json({ error: 'Failed to reset tracking script', details: error.message });
+  }
+});
 
 export default customRouter;
