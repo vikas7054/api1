@@ -1,16 +1,18 @@
 /**
  * Custom Analytics API Routes
- * Optimized for CSP-bypass tracking with prefetch support
+ * Optimized for Option 3 tracking with efficient data handling
  * Routes mounted under /api/custom/
  */
 
 import express from 'express';
-import mysql from 'mysql2/promise';
+import mysql from 'mysql2/promise'; // Added missing driver import
 
 const customRouter = express.Router();
 
+// Initialize the single pool variable reference
 let pool = null;
 
+// Helper to extract real IP from request
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
   if (forwarded) {
@@ -20,10 +22,12 @@ function getClientIp(req) {
   return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
 }
 
+// Exportable setter function for server.js to pass its pool instance
 export function setCustomPool(mysqlPool) {
   pool = mysqlPool;
 }
 
+// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one
 try {
   pool = mysql.createPool({
     host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
@@ -39,40 +43,20 @@ try {
   console.error('Custom API: Standalone fallback database connection failed:', err.message);
 }
 
-// Parse data from GET query or POST body
-function extractData(req) {
-  if (req.method === 'GET') {
-    try {
-      return JSON.parse(req.query.data);
-    } catch (e) {
-      return null;
-    }
-  }
-  return req.body;
-}
-
 // ============ CUSTOM PROJECT-SCOPED EVENTS ============
 
-customRouter.all('/:projectId/events/track', async (req, res) => {
+customRouter.post('/:projectId/events/track', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
     const { projectId } = req.params;
     const ip = getClientIp(req);
-    const eventData = extractData(req);
-    if (!eventData) return res.status(400).json({ error: 'Invalid data' });
-
-    const fullData = { ...eventData, projectId, ip, recordedVia: req.method === 'GET' ? 'prefetch' : 'custom' };
+    const eventData = { ...req.body, projectId, ip, recordedVia: 'custom' };
 
     await pool.execute(
       'INSERT INTO events (project_id, event_data) VALUES (?, ?)',
-      [projectId, JSON.stringify(fullData)]
+      [projectId, JSON.stringify(eventData)]
     );
-
-    if (req.method === 'GET') {
-      res.set('Content-Type', 'text/plain');
-      return res.status(200).send('ok');
-    }
     res.status(200).json({ success: true, recorded: true });
   } catch (error) {
     console.error('Custom API: Event track error:', error.message);
@@ -102,7 +86,7 @@ customRouter.get('/:projectId/events', async (req, res) => {
 
 // ============ CUSTOM PROJECT-SCOPED SESSIONS ============
 
-customRouter.all('/:projectId/session', async (req, res) => {
+customRouter.post('/:projectId/session', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
@@ -111,28 +95,21 @@ customRouter.all('/:projectId/session', async (req, res) => {
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
 
-    const sessionData = extractData(req);
-    if (!sessionData) return res.status(400).json({ error: 'Invalid data' });
-
+    const { meta, ...sessionData } = req.body;
     const fullSessionData = {
       ...sessionData,
       projectId,
       ip,
       timestamp,
       recordedAt,
-      recordedVia: req.method === 'GET' ? 'prefetch' : 'custom',
-      meta: sessionData.meta || {}
+      recordedVia: 'custom',
+      meta: meta || {}
     };
 
     await pool.execute(
       'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
       [projectId, JSON.stringify(fullSessionData), new Date(), recordedAt]
     );
-
-    if (req.method === 'GET') {
-      res.set('Content-Type', 'text/plain');
-      return res.status(200).send('ok');
-    }
     res.status(200).json({ success: true, recorded: true });
   } catch (error) {
     console.error('Custom API: Session save error:', error.message);
@@ -307,50 +284,67 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
   }
 });
 
-// ============ CSP-BYPASS TRACKING SCRIPT (per project) ============
+// ============ CUSTOM TRACKING SCRIPT (per project) ============
 
-const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via prefetch
+const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
+//
+// HOW TO TURN THINGS ON/OFF:
+// Just edit the CONFIG object below. No dashboard, no HTML needed.
+//   rrwebRecording: true  -> session replay recording auto-starts (default)
+//   rrwebRecording: false -> session replay never starts, nothing sent for it
+//   eventTracking:  true  -> pageview/click/custom events send to API (default)
+//   eventTracking:  false -> events are blocked locally, nothing sent
+//   autoClicks:     true  -> clicks are tracked automatically (default)
+//   autoClicks:     false -> clicks are not tracked
+//
+// These same 3 switches can ALSO be controlled at runtime from your own code:
+//   window.AnalyticsTracker.stopSession() / startSession()
+//   window.AnalyticsTracker.disableEvents() / enableEvents()
+//   window.AnalyticsTracker.disableAutoClicks() / enableAutoClicks()
+//
+// Single-tag install — server injects the project ID automatically:
+//   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
 (function() {
-  var API_URL = 'https://api1-orpin.vercel.app/api/custom';
-  var RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
+  const API_URL = 'https://api1-orpin.vercel.app/api/custom';
+  const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
 
-  var CONFIG = {
-    rrwebRecording: false,
-    eventTracking: true,
-    autoClicks: true,
-    inactivityTimeoutMinutes: 5,
-    mouseMoveSampling: 20
+  // ---- EDIT THESE TO SET DEFAULTS FOR THIS PROJECT ----
+  const CONFIG = {
+    rrwebRecording: true,   // session replay recording — ON
+    eventTracking: true,    // pageview / click / custom events — on by default
+    autoClicks: true,       // automatic click capture — on by default
+    inactivityTimeoutMinutes: 5, // after this many minutes with no interaction, stop sending;
+                                  // a new session ID is issued when the user comes back.
+                                  // Set to false (or 0) to turn this off completely —
+                                  // script then behaves exactly like before, no timeout at all.
+    mouseMoveSampling: 20   // ms between recorded mouse positions.
+                            // Lower (e.g. 20) = smoother replay, more data sent.
+                            // Higher (e.g. 300-500) = choppier replay, less data sent.
+                            // Set very high (e.g. 999999) to basically only capture clicks,
+                            // not continuous movement.
   };
+  // -------------------------------------------------------
 
-  var events = [];
-  var recording = false;
-  var stopFn = null;
-  var sendInterval = null;
-  var projectId = '__PROJECT_ID__';
-  var rrwebLoading = false;
-  var rrwebCallbacks = [];
-  var autoClicksEnabled = false;
-  var clickHandler = null;
-  var eventsOn = CONFIG.eventTracking;
-  var lastActivityTime = Date.now();
-  var isInactive = false;
-  var inactivityCheckInterval = null;
+  let events = [];
+  let recording = false;
+  let stopFn = null;
+  let sendInterval = null;
+  let projectId = '__PROJECT_ID__';
+  let rrwebLoading = false;
+  let rrwebCallbacks = [];
+  let autoClicksEnabled = false;
+  let clickHandler = null;
+  let eventsOn = CONFIG.eventTracking;
+  let lastActivityTime = Date.now();
+  let isInactive = false;
+  let inactivityCheckInterval = null;
 
   function generateId() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      var r = Math.random() * 16 | 0;
-      var v = c === 'x' ? r : (r & 0x3 | 0x8);
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
       return v.toString(16);
     });
-  }
-
-  // ===== CSP BYPASS: <link rel="prefetch"> instead of fetch() =====
-  function sendViaPrefetch(url, data) {
-    var link = document.createElement('link');
-    link.rel = 'prefetch';
-    link.href = url + '?data=' + encodeURIComponent(JSON.stringify(data)) + '&_=' + Date.now();
-    document.head.appendChild(link);
-    setTimeout(function() { if (link.parentNode) link.parentNode.removeChild(link); }, 500);
   }
 
   function ensureRrwebLoaded(callback) {
@@ -369,60 +363,92 @@ const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via p
   }
 
   function getProjectId() { return projectId; }
+
   function getVisitorId() {
-    var visitorId = localStorage.getItem('visitorId');
-    if (!visitorId) { visitorId = generateId(); localStorage.setItem('visitorId', visitorId); }
+    let visitorId = localStorage.getItem('visitorId');
+    if (!visitorId) {
+      visitorId = generateId();
+      localStorage.setItem('visitorId', visitorId);
+    }
     return visitorId;
   }
+
   function getSessionId() {
-    var sessionId = sessionStorage.getItem('sessionId');
-    if (!sessionId) { sessionId = generateId(); sessionStorage.setItem('sessionId', sessionId); }
+    let sessionId = sessionStorage.getItem('sessionId');
+    if (!sessionId) {
+      sessionId = generateId();
+      sessionStorage.setItem('sessionId', sessionId);
+    }
     return sessionId;
   }
 
+  // ---- Inactivity handling ----
+  // If there's no interaction for CONFIG.inactivityTimeoutMinutes, stop sending
+  // data to the API and drop whatever's buffered. When the user interacts again,
+  // a brand new session ID is issued — nothing after resuming uses the old one.
   function startNewSessionAfterInactivity() {
-    var newId = generateId();
+    const newId = generateId();
     sessionStorage.setItem('sessionId', newId);
-    events = [];
+    events = []; // discard anything buffered from before the gap, it's stale
+
+    // rrweb only records a full DOM snapshot once, at the moment recording starts.
+    // Everything after that is incremental diffs. Since the recorder itself never
+    // stopped while inactive, the new session needs its own full snapshot as the
+    // first event, or the player has nothing to reconstruct the page from.
     if (recording && typeof rrweb !== 'undefined' && rrweb.record && typeof rrweb.record.takeFullSnapshot === 'function') {
       rrweb.record.takeFullSnapshot();
     }
   }
 
   function handleActivity() {
-    if (isInactive) { isInactive = false; startNewSessionAfterInactivity(); }
+    if (isInactive) {
+      isInactive = false;
+      startNewSessionAfterInactivity();
+    }
     lastActivityTime = Date.now();
   }
 
   function checkInactivity() {
-    if (!CONFIG.inactivityTimeoutMinutes) return;
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled, do nothing
     if (isInactive) return;
-    if (Date.now() - lastActivityTime >= CONFIG.inactivityTimeoutMinutes * 60 * 1000) {
-      isInactive = true; events = [];
+    const timeoutMs = CONFIG.inactivityTimeoutMinutes * 60 * 1000;
+    if (Date.now() - lastActivityTime >= timeoutMs) {
+      isInactive = true;
+      events = []; // stop carrying stale buffered data forward
     }
   }
 
   function startInactivityWatcher() {
-    if (!CONFIG.inactivityTimeoutMinutes) return;
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled — old behavior, no watcher at all
     ['mousemove', 'keydown', 'scroll', 'click', 'touchstart'].forEach(function(evt) {
       document.addEventListener(evt, handleActivity, { passive: true });
     });
     if (inactivityCheckInterval) clearInterval(inactivityCheckInterval);
-    inactivityCheckInterval = setInterval(checkInactivity, 30000);
+    inactivityCheckInterval = setInterval(checkInactivity, 30000); // check every 30s
   }
 
+  // ---- Session recording (rrweb) ----
   function startRecording() {
     if (recording || !getProjectId()) return;
+
     ensureRrwebLoaded(function() {
       if (recording) return;
+
       stopFn = rrweb.record({
-        emit(event) { events.push(event); if (events.length >= 10) sendEvents(); },
-        recordCanvas: true, recordAfter: 'DOMContentLoaded',
-        maskAllInputs: false, maskTextSelector: '[data-mask]',
+        emit(event) {
+          events.push(event);
+          if (events.length >= 10) sendEvents();
+        },
+        recordCanvas: true,
+        recordAfter: 'DOMContentLoaded',
+        maskAllInputs: false,
+        maskTextSelector: '[data-mask]',
         slimDOMOptions: { script: true, comment: true, headFavicon: true, headWhitespace: true },
         sampling: { canvas: 10, input: 'last', scroll: 150, media: 500, mousemove: CONFIG.mouseMoveSampling },
-        dataURLOptions: { type: 'image/webp', quality: 0.8 }, inlineStylesheet: true
+        dataURLOptions: { type: 'image/webp', quality: 0.8 },
+        inlineStylesheet: true
       });
+
       recording = true;
       if (sendInterval) clearInterval(sendInterval);
       sendInterval = setInterval(sendEvents, 5000);
@@ -433,40 +459,72 @@ const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via p
     if (!recording) return;
     if (typeof stopFn === 'function') { stopFn(); stopFn = null; }
     if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
-    recording = false; sendEvents();
+    recording = false;
+    sendEvents(); // flush what's left
   }
 
-  // ===== CSP BYPASS: send via prefetch =====
-  function sendEvents() {
-    if (isInactive) return;
+  async function sendEvents() {
+    if (isInactive) return; // paused — user inactive past the timeout
     if (events.length === 0 || !getProjectId()) return;
-    var eventsToSend = events.splice(0, events.length);
-    sendViaPrefetch(API_URL + '/' + getProjectId() + '/session', {
-      sessionId: getSessionId(), visitorId: getVisitorId(),
-      timestamp: new Date().toISOString(), url: window.location.href,
+
+    const eventsToSend = events.splice(0, events.length);
+    const sessionData = {
+      sessionId: getSessionId(),
+      visitorId: getVisitorId(),
+      timestamp: new Date().toISOString(),
+      url: window.location.href,
       userAgent: navigator.userAgent,
       screenResolution: window.screen.width + 'x' + window.screen.height,
-      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
       devicePixelRatio: window.devicePixelRatio || 1,
       events: eventsToSend
-    });
+    };
+
+    try {
+      await fetch(API_URL + '/' + getProjectId() + '/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sessionData),
+      });
+    } catch (error) {
+      console.error('Failed to send session data:', error);
+      events.unshift(...eventsToSend);
+    }
   }
 
+  // ---- Events (pageview / click / custom) ----
   function trackEvent(eventName, eventData) {
-    if (isInactive) return;
-    if (!eventsOn) { console.warn('Analytics: eventTracking is OFF'); return; }
-    if (!getProjectId()) { console.warn('Analytics: No project ID'); return; }
+    if (isInactive) return; // paused — user inactive past the timeout
+    if (!eventsOn) {
+      console.warn('Analytics: eventTracking is OFF (CONFIG.eventTracking / disableEvents()) — "' + eventName + '" was NOT sent.');
+      return;
+    }
+    if (!getProjectId()) {
+      console.warn('Analytics: No project ID configured.');
+      return;
+    }
+
     var event = {
-      timestamp: new Date().toISOString(), visitorId: getVisitorId(),
-      sessionId: getSessionId(), eventName: eventName,
-      url: window.location.href, referrer: document.referrer,
+      timestamp: new Date().toISOString(),
+      visitorId: getVisitorId(),
+      sessionId: getSessionId(),
+      eventName: eventName,
+      url: window.location.href,
+      referrer: document.referrer,
       userAgent: navigator.userAgent,
       screenResolution: window.screen.width + 'x' + window.screen.height,
-      viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
       language: navigator.language
     };
     if (eventData) Object.assign(event, eventData);
-    sendViaPrefetch(API_URL + '/' + getProjectId() + '/events/track', event);
+
+    fetch(API_URL + '/' + getProjectId() + '/events/track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
+    }).catch(console.error);
   }
 
   function trackPageview() { trackEvent('pageview'); }
@@ -475,48 +533,141 @@ const CSP_BYPASS_SCRIPT = `// Web Analytics Tracking Script — CSP Bypass via p
     var target = e.target.closest('a, button');
     if (target) {
       trackEvent('click', {
-        elementType: target.tagName.toLowerCase(), elementText: target.textContent ? target.textContent.trim() : '',
-        elementId: target.id, elementClass: target.className,
-        clickX: e.clientX, clickY: e.clientY
+        elementType: target.tagName.toLowerCase(),
+        elementText: target.textContent ? target.textContent.trim() : '',
+        elementId: target.id,
+        elementClass: target.className,
+        clickX: e.clientX,
+        clickY: e.clientY
       });
     }
   }
 
-  function enableAutoClicks() { if (!autoClicksEnabled) { clickHandler = handleClick; document.addEventListener('click', clickHandler); autoClicksEnabled = true; } }
-  function disableAutoClicks() { if (autoClicksEnabled) { document.removeEventListener('click', clickHandler); clickHandler = null; autoClicksEnabled = false; } }
+  function enableAutoClicks() {
+    if (autoClicksEnabled) return;
+    clickHandler = handleClick;
+    document.addEventListener('click', clickHandler);
+    autoClicksEnabled = true;
+  }
+
+  function disableAutoClicks() {
+    if (!autoClicksEnabled) return;
+    document.removeEventListener('click', clickHandler);
+    clickHandler = null;
+    autoClicksEnabled = false;
+  }
+
   function enableEvents() { eventsOn = true; }
   function disableEvents() { eventsOn = false; }
-  function setMouseTrackingSmooth() { CONFIG.mouseMoveSampling = 20; if (recording) { stopRecording(); startRecording(); } }
-  function setMouseTrackingLight() { CONFIG.mouseMoveSampling = 500; if (recording) { stopRecording(); startRecording(); } }
+
+  // Mouse tracking presets. rrweb's sampling rate is locked in when recording
+  // starts, so switching it means restarting the recorder (which also takes
+  // a fresh full snapshot, same as the inactivity-resume flow above).
+  function setMouseTrackingSmooth() {
+    CONFIG.mouseMoveSampling = 20;
+    if (recording) { stopRecording(); startRecording(); }
+  }
+
+  function setMouseTrackingLight() {
+    CONFIG.mouseMoveSampling = 500;
+    if (recording) { stopRecording(); startRecording(); }
+  }
+
   function setProjectId(pId) { projectId = pId; }
 
   function init(pId) {
     if (pId) projectId = pId;
+
     startInactivityWatcher();
+
     if (CONFIG.rrwebRecording) startRecording();
     if (CONFIG.eventTracking) trackPageview();
     if (CONFIG.autoClicks) enableAutoClicks();
   }
 
-  window.addEventListener('beforeunload', function() {
-    if (recording) { if (sendInterval) clearInterval(sendInterval); sendEvents(); }
+  window.addEventListener('beforeunload', () => {
+    if (recording) {
+      if (sendInterval) clearInterval(sendInterval);
+      sendEvents();
+    }
   });
 
+  // Auto-init: project ID is already injected server-side.
   if (projectId) {
-    if (document.readyState === 'complete') { init(projectId); }
-    else { window.addEventListener('load', function() { init(projectId); }); }
+    if (document.readyState === 'complete') {
+      init(projectId);
+    } else {
+      window.addEventListener('load', function() { init(projectId); });
+    }
   }
 
+  // ============================================================
+  // EXAMPLE: custom events — DISABLED by default, just a template.
+  // Everything below is commented out, so none of it runs on its own.
+  // Each example is wired to a REAL element with addEventListener, so if
+  // you uncomment one, give the matching id="..." to your actual HTML
+  // element and it will just work — no page-load misfires.
+  // ============================================================
+  //
+  // Track a custom event with optional data (call this from anywhere
+  // in your own code, at the exact moment you want it to fire):
+  // trackEvent('event_name', {
+  //   category: 'category',
+  //   label: 'label',
+  //   value: 123
+  // });
+  //
+  // Form Submissions — put id="contact-form" on your <form>
+  // document.getElementById('contact-form')?.addEventListener('submit', function() {
+  //   trackEvent('form_submit', {
+  //     formId: 'contact',
+  //     success: true
+  //   });
+  // });
+  //
+  // Feature Usage — put id="search-input" on your search box, fires after Enter
+  // document.getElementById('search-input')?.addEventListener('keydown', function(e) {
+  //   if (e.key === 'Enter') {
+  //     trackEvent('feature_used', {
+  //       feature: 'search',
+  //       query: e.target.value
+  //     });
+  //   }
+  // });
+  //
+  // CTA Clicks — put id="signup-hero-btn" on your button/link
+  // document.getElementById('signup-hero-btn')?.addEventListener('click', function() {
+  //   trackEvent('cta_click', {
+  //     ctaId: 'signup-hero',
+  //     location: 'header'
+  //   });
+  // });
+  //
+  // ============================================================
+
+  // Runtime control, in case you want to flip things without editing CONFIG.
   window.trackEvent = trackEvent;
   window.AnalyticsTracker = {
-    init: init, setProjectId: setProjectId, startSession: startRecording, stopSession: stopRecording,
-    isRecording: function() { return recording; }, enableEvents: enableEvents, disableEvents: disableEvents,
-    isEventsOn: function() { return eventsOn; }, trackEvent: trackEvent, trackPageview: trackPageview,
-    enableAutoClicks: enableAutoClicks, disableAutoClicks: disableAutoClicks,
-    isAutoClicksEnabled: function() { return autoClicksEnabled; }, isInactive: function() { return isInactive; },
+    init: init,
+    setProjectId: setProjectId,
+    startSession: startRecording,
+    stopSession: stopRecording,
+    isRecording: function() { return recording; },
+    enableEvents: enableEvents,
+    disableEvents: disableEvents,
+    isEventsOn: function() { return eventsOn; },
+    trackEvent: trackEvent,
+    trackPageview: trackPageview,
+    enableAutoClicks: enableAutoClicks,
+    disableAutoClicks: disableAutoClicks,
+    isAutoClicksEnabled: function() { return autoClicksEnabled; },
+    isInactive: function() { return isInactive; },
     getLastActivityTime: function() { return lastActivityTime; },
-    setMouseTrackingSmooth: setMouseTrackingSmooth, setMouseTrackingLight: setMouseTrackingLight,
-    getProjectId: getProjectId, getVisitorId: getVisitorId, getSessionId: getSessionId
+    setMouseTrackingSmooth: setMouseTrackingSmooth,
+    setMouseTrackingLight: setMouseTrackingLight,
+    getProjectId: getProjectId,
+    getVisitorId: getVisitorId,
+    getSessionId: getSessionId
   };
 })();`;
 
@@ -536,13 +687,15 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
     if (rows.length > 0) {
       scriptContent = rows[0].script_content;
     } else {
-      scriptContent = CSP_BYPASS_SCRIPT;
+      // No custom script saved yet — return default and persist it
+      scriptContent = DEFAULT_TRACKING_SCRIPT;
       await pool.execute(
         'INSERT INTO tracking_scripts (project_id, script_content) VALUES (?, ?)',
         [projectId, scriptContent]
       );
     }
 
+    // Inject the real project ID server-side so the client doesn't need to detect it
     scriptContent = scriptContent.replace(/__PROJECT_ID__/g, projectId);
 
     res.set('Content-Type', 'application/javascript');
@@ -572,7 +725,7 @@ customRouter.get('/:projectId/tracking-script', async (req, res) => {
       scriptContent = rows[0].script_content;
       updatedAt = rows[0].updated_at;
     } else {
-      scriptContent = CSP_BYPASS_SCRIPT;
+      scriptContent = DEFAULT_TRACKING_SCRIPT;
       await pool.execute(
         'INSERT INTO tracking_scripts (project_id, script_content) VALUES (?, ?)',
         [projectId, scriptContent]
@@ -623,10 +776,10 @@ customRouter.post('/:projectId/tracking-script/reset', async (req, res) => {
       `INSERT INTO tracking_scripts (project_id, script_content)
        VALUES (?, ?)
        ON DUPLICATE KEY UPDATE script_content = VALUES(script_content)`,
-      [projectId, CSP_BYPASS_SCRIPT]
+      [projectId, DEFAULT_TRACKING_SCRIPT]
     );
 
-    res.json({ success: true, projectId, scriptContent: CSP_BYPASS_SCRIPT, message: 'Tracking script reset to default' });
+    res.json({ success: true, projectId, scriptContent: DEFAULT_TRACKING_SCRIPT, message: 'Tracking script reset to default' });
   } catch (error) {
     console.error('Custom API: Reset tracking script error:', error.message);
     res.status(500).json({ error: 'Failed to reset tracking script', details: error.message });
