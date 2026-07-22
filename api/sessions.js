@@ -1,38 +1,16 @@
 /**
- * Session API Routes
- * Extracted from the custom analytics router (customRoutes.js)
- * Contains ONLY the session-related endpoints:
- *   POST   /:projectId/session          - save a single session
- *   GET    /:projectId/sessions         - list sessions for a project
- *   POST   /:projectId/sessions/batch   - save multiple sessions at once
- *
- * Mount this router the same way as the custom router, e.g.:
- *   import sessionRouter, { setSessionPool } from './session.js';
- *   setSessionPool(pool); // pass your existing mysql2 pool in
- *   app.use('/api/custom', sessionRouter);
- *
- * NOTE: This file does NOT create its own fallback DB pool on purpose.
- * The original customRoutes.js creates a fallback pool at load time; if this
- * file did the same, you'd end up with two separate pools connected to the
- * same database (double connections, double connection-limit usage).
- * Instead, call setSessionPool(pool) once from server.js / customRoutes.js
- * with the pool you already have. If you actually want this file to be
- * fully standalone with its own fallback pool, let me know and I'll add it.
+ * Custom Analytics - Session API Routes
+ * Routes mounted under /api/custom/
  */
 
 import express from 'express';
+import mysql from 'mysql2/promise';
 
-const sessionRouter = express.Router();
+const sessionsRouter = express.Router();
 
-// Pool reference — must be injected via setSessionPool()
 let pool = null;
 
-// Exportable setter so server.js / customRoutes.js can hand over the pool instance
-export function setSessionPool(mysqlPool) {
-  pool = mysqlPool;
-}
-
-// Helper to extract real IP from request (same logic as customRoutes.js)
+// Helper to extract real IP from request
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
   if (forwarded) {
@@ -42,9 +20,30 @@ function getClientIp(req) {
   return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
 }
 
-// ============ SAVE SINGLE SESSION ============
+// Exportable setter function for server.js / custom.js to pass its pool instance
+export function setSessionsPool(mysqlPool) {
+  pool = mysqlPool;
+}
 
-sessionRouter.post('/:projectId/session', async (req, res) => {
+// Fallback configuration block
+try {
+  pool = mysql.createPool({
+    host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
+    port: Number(process.env.DB_PORT) || 4000,
+    user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
+    password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
+    database: process.env.DB_DATABASE || 'test',
+    ssl: { rejectUnauthorized: true },
+    waitForConnections: true,
+    connectionLimit: 10,
+  });
+} catch (err) {
+  console.error('Sessions API: Standalone fallback database connection failed:', err.message);
+}
+
+// ============ SINGLE SESSION TRACKING ============
+
+sessionsRouter.post('/:projectId/session', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
@@ -70,14 +69,14 @@ sessionRouter.post('/:projectId/session', async (req, res) => {
     );
     res.status(200).json({ success: true, recorded: true });
   } catch (error) {
-    console.error('Session API: Session save error:', error.message);
+    console.error('Sessions API: Session save error:', error.message);
     res.status(500).json({ error: 'Failed to save session', details: error.message });
   }
 });
 
-// ============ LIST SESSIONS ============
+// ============ FETCH SESSIONS ============
 
-sessionRouter.get('/:projectId/sessions', async (req, res) => {
+sessionsRouter.get('/:projectId/sessions', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
@@ -92,14 +91,14 @@ sessionRouter.get('/:projectId/sessions', async (req, res) => {
     const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
     res.json({ sessions, limit, offset, count: sessions.length });
   } catch (error) {
-    console.error('Session API: Sessions fetch error:', error.message);
+    console.error('Sessions API: Sessions fetch error:', error.message);
     res.status(500).json({ error: 'Failed to read sessions', details: error.message });
   }
 });
 
-// ============ SESSION BATCH ============
+// ============ SESSION BATCH ENDPOINT ============
 
-sessionRouter.post('/:projectId/sessions/batch', async (req, res) => {
+sessionsRouter.post('/:projectId/sessions/batch', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
@@ -133,9 +132,9 @@ sessionRouter.post('/:projectId/sessions/batch', async (req, res) => {
 
     res.status(200).json({ success: true, recorded: sessionBatch.length });
   } catch (error) {
-    console.error('Session API: Batch session error:', error.message);
+    console.error('Sessions API: Batch session error:', error.message);
     res.status(500).json({ error: 'Failed to save sessions batch', details: error.message });
   }
 });
 
-export default sessionRouter;
+export default sessionsRouter;
