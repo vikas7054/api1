@@ -74,25 +74,88 @@ sessionsRouter.post('/:projectId/session', async (req, res) => {
   }
 });
 
-// ============ FETCH SESSIONS ============
+// ============ FETCH SESSIONS LIST (OPTIMIZED: METADATA ONLY) ============
 
 sessionsRouter.get('/:projectId/sessions', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
     const { projectId } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = parseInt(req.query.offset) || 0;
 
+    // Uses TiDB JSON extraction to strictly avoid transferring heavy events arrays in list views
     const [rows] = await pool.execute(
-      'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?',
+      `SELECT 
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) as sessionId,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.visitorId')) as visitorId,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.timestamp')) as timestamp,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.url')) as url,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.userAgent')) as userAgent,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.screenResolution')) as screenResolution,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.ip')) as ip,
+        JSON_LENGTH(JSON_EXTRACT(session_data, '$.events')) as eventCount
+       FROM sessions 
+       WHERE project_id = ? 
+       ORDER BY timestamp DESC 
+       LIMIT ? OFFSET ?`,
       [projectId, limit, offset]
     );
-    const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
-    res.json({ sessions, limit, offset, count: sessions.length });
+
+    res.json({ sessions: rows, limit, offset, count: rows.length });
   } catch (error) {
     console.error('Sessions API: Sessions fetch error:', error.message);
     res.status(500).json({ error: 'Failed to read sessions', details: error.message });
+  }
+});
+
+// ============ FETCH SINGLE SESSION (FULL DETAILS & EVENTS FOR PLAYER) ============
+
+sessionsRouter.get('/:projectId/sessions/:sessionId', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId, sessionId } = req.params;
+
+    const [rows] = await pool.execute(
+      `SELECT session_data FROM sessions 
+       WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ? 
+       LIMIT 1`,
+      [projectId, sessionId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const session = typeof rows[0].session_data === 'string' 
+      ? JSON.parse(rows[0].session_data) 
+      : rows[0].session_data;
+
+    res.json({ session });
+  } catch (error) {
+    console.error('Sessions API: Single session fetch error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch session details', details: error.message });
+  }
+});
+
+// ============ DELETE SINGLE SESSION ============
+
+sessionsRouter.delete('/:projectId/sessions/:sessionId', async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+
+  try {
+    const { projectId, sessionId } = req.params;
+
+    const [result] = await pool.execute(
+      `DELETE FROM sessions WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ?`,
+      [projectId, sessionId]
+    );
+
+    res.json({ success: true, deleted: result.affectedRows });
+  } catch (error) {
+    console.error('Sessions API: Delete session error:', error.message);
+    res.status(500).json({ error: 'Failed to delete session', details: error.message });
   }
 });
 
