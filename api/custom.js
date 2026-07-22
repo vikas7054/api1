@@ -5,13 +5,10 @@
  */
 
 import express from 'express';
-import mysql from 'mysql2/promise';
-import sessionsRouter, { setSessionsPool } from './sessions.js';
+import mysql from 'mysql2/promise'; // Added missing driver import
+import sessionRouter, { setSessionPool } from './session.js';
 
 const customRouter = express.Router();
-
-// Mount sessions router (All session endpoints will be accessible via /api/custom/...)
-customRouter.use('/', sessionsRouter);
 
 // Initialize the single pool variable reference
 let pool = null;
@@ -29,10 +26,10 @@ function getClientIp(req) {
 // Exportable setter function for server.js to pass its pool instance
 export function setCustomPool(mysqlPool) {
   pool = mysqlPool;
-  setSessionsPool(mysqlPool); // Pass pool down to sessions module
+  setSessionPool(mysqlPool);
 }
 
-// Fallback configuration block
+// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one
 try {
   pool = mysql.createPool({
     host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
@@ -44,9 +41,13 @@ try {
     waitForConnections: true,
     connectionLimit: 10,
   });
+  setSessionPool(pool);
 } catch (err) {
   console.error('Custom API: Standalone fallback database connection failed:', err.message);
 }
+
+// Mount session module under /:projectId/session
+customRouter.use('/:projectId/session', sessionRouter);
 
 // ============ CUSTOM PROJECT-SCOPED EVENTS ============
 
@@ -198,17 +199,43 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
 const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
+//
+// HOW TO TURN THINGS ON/OFF:
+// Just edit the CONFIG object below. No dashboard, no HTML needed.
+//   rrwebRecording: true  -> session replay recording auto-starts (default)
+//   rrwebRecording: false -> session replay never starts, nothing sent for it
+//   eventTracking:  true  -> pageview/click/custom events send to API (default)
+//   eventTracking:  false -> events are blocked locally, nothing sent
+//   autoClicks:     true  -> clicks are tracked automatically (default)
+//   autoClicks:     false -> clicks are not tracked
+//
+// These same 3 switches can ALSO be controlled at runtime from your own code:
+//   window.AnalyticsTracker.stopSession() / startSession()
+//   window.AnalyticsTracker.disableEvents() / enableEvents()
+//   window.AnalyticsTracker.disableAutoClicks() / enableAutoClicks()
+//
+// Single-tag install — server injects the project ID automatically:
+//   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
 
+  // ---- EDIT THESE TO SET DEFAULTS FOR THIS PROJECT ----
   const CONFIG = {
-    rrwebRecording: true,
-    eventTracking: true,
-    autoClicks: true,
-    inactivityTimeoutMinutes: 5,
-    mouseMoveSampling: 20
+    rrwebRecording: true,   // session replay recording — ON
+    eventTracking: true,    // pageview / click / custom events — on by default
+    autoClicks: true,       // automatic click capture — on by default
+    inactivityTimeoutMinutes: 5, // after this many minutes with no interaction, stop sending;
+                                  // a new session ID is issued when the user comes back.
+                                  // Set to false (or 0) to turn this off completely —
+                                  // script then behaves exactly like before, no timeout at all.
+    mouseMoveSampling: 20   // ms between recorded mouse positions.
+                            // Lower (e.g. 20) = smoother replay, more data sent.
+                            // Higher (e.g. 300-500) = choppier replay, less data sent.
+                            // Set very high (e.g. 999999) to basically only capture clicks,
+                            // not continuous movement.
   };
+  // -------------------------------------------------------
 
   let events = [];
   let recording = false;
@@ -267,11 +294,19 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     return sessionId;
   }
 
+  // ---- Inactivity handling ----
+  // If there's no interaction for CONFIG.inactivityTimeoutMinutes, stop sending
+  // data to the API and drop whatever's buffered. When the user interacts again,
+  // a brand new session ID is issued — nothing after resuming uses the old one.
   function startNewSessionAfterInactivity() {
     const newId = generateId();
     sessionStorage.setItem('sessionId', newId);
-    events = [];
+    events = []; // discard anything buffered from before the gap, it's stale
 
+    // rrweb only records a full DOM snapshot once, at the moment recording starts.
+    // Everything after that is incremental diffs. Since the recorder itself never
+    // stopped while inactive, the new session needs its own full snapshot as the
+    // first event, or the player has nothing to reconstruct the page from.
     if (recording && typeof rrweb !== 'undefined' && rrweb.record && typeof rrweb.record.takeFullSnapshot === 'function') {
       rrweb.record.takeFullSnapshot();
     }
@@ -286,24 +321,25 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
   }
 
   function checkInactivity() {
-    if (!CONFIG.inactivityTimeoutMinutes) return;
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled, do nothing
     if (isInactive) return;
     const timeoutMs = CONFIG.inactivityTimeoutMinutes * 60 * 1000;
     if (Date.now() - lastActivityTime >= timeoutMs) {
       isInactive = true;
-      events = [];
+      events = []; // stop carrying stale buffered data forward
     }
   }
 
   function startInactivityWatcher() {
-    if (!CONFIG.inactivityTimeoutMinutes) return;
+    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled — old behavior, no watcher at all
     ['mousemove', 'keydown', 'scroll', 'click', 'touchstart'].forEach(function(evt) {
       document.addEventListener(evt, handleActivity, { passive: true });
     });
     if (inactivityCheckInterval) clearInterval(inactivityCheckInterval);
-    inactivityCheckInterval = setInterval(checkInactivity, 30000);
+    inactivityCheckInterval = setInterval(checkInactivity, 30000); // check every 30s
   }
 
+  // ---- Session recording (rrweb) ----
   function startRecording() {
     if (recording || !getProjectId()) return;
 
@@ -336,11 +372,11 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     if (typeof stopFn === 'function') { stopFn(); stopFn = null; }
     if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
     recording = false;
-    sendEvents();
+    sendEvents(); // flush what's left
   }
 
   async function sendEvents() {
-    if (isInactive) return;
+    if (isInactive) return; // paused — user inactive past the timeout
     if (events.length === 0 || !getProjectId()) return;
 
     const eventsToSend = events.splice(0, events.length);
@@ -369,10 +405,17 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   }
 
+  // ---- Events (pageview / click / custom) ----
   function trackEvent(eventName, eventData) {
-    if (isInactive) return;
-    if (!eventsOn) return;
-    if (!getProjectId()) return;
+    if (isInactive) return; // paused — user inactive past the timeout
+    if (!eventsOn) {
+      console.warn('Analytics: eventTracking is OFF (CONFIG.eventTracking / disableEvents()) — "' + eventName + '" was NOT sent.');
+      return;
+    }
+    if (!getProjectId()) {
+      console.warn('Analytics: No project ID configured.');
+      return;
+    }
 
     var event = {
       timestamp: new Date().toISOString(),
@@ -429,6 +472,9 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
   function enableEvents() { eventsOn = true; }
   function disableEvents() { eventsOn = false; }
 
+  // Mouse tracking presets. rrweb's sampling rate is locked in when recording
+  // starts, so switching it means restarting the recorder (which also takes
+  // a fresh full snapshot, same as the inactivity-resume flow above).
   function setMouseTrackingSmooth() {
     CONFIG.mouseMoveSampling = 20;
     if (recording) { stopRecording(); startRecording(); }
@@ -458,6 +504,7 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   });
 
+  // Auto-init: project ID is already injected server-side.
   if (projectId) {
     if (document.readyState === 'complete') {
       init(projectId);
@@ -466,6 +513,7 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   }
 
+  // Runtime control, in case you want to flip things without editing CONFIG.
   window.trackEvent = trackEvent;
   window.AnalyticsTracker = {
     init: init,
@@ -507,6 +555,7 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
     if (rows.length > 0) {
       scriptContent = rows[0].script_content;
     } else {
+      // No custom script saved yet — return default and persist it
       scriptContent = DEFAULT_TRACKING_SCRIPT;
       await pool.execute(
         'INSERT INTO tracking_scripts (project_id, script_content) VALUES (?, ?)',
@@ -514,6 +563,7 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
       );
     }
 
+    // Inject the real project ID server-side so the client doesn't need to detect it
     scriptContent = scriptContent.replace(/__PROJECT_ID__/g, projectId);
 
     res.set('Content-Type', 'application/javascript');
