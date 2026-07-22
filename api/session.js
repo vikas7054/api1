@@ -1,20 +1,16 @@
 import express from 'express';
-
 const sessionRouter = express.Router({ mergeParams: true });
 
 let pool = null;
-
 export function setSessionPool(mysqlPool) {
   pool = mysqlPool;
 }
 
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
-
   if (forwarded) {
     return forwarded.split(',')[0].trim();
   }
-
   return (
     req.headers['x-real-ip'] ||
     req.socket?.remoteAddress ||
@@ -24,21 +20,13 @@ function getClientIp(req) {
 
 // ======================================================
 // SAVE RRWEB CHUNK
-// POST /api/custom/:projectId/session
 // ======================================================
 sessionRouter.post('/', async (req, res) => {
-  if (!pool)
-    return res.status(500).json({
-      error: "Database not initialized"
-    });
-
+  if (!pool) return res.status(500).json({ error: "Database not initialized" });
   try {
     const { projectId } = req.params;
-
     const now = new Date();
-
     const recordedAt = now.toISOString().replace(/[:.]/g, '-');
-
     const sessionData = {
       ...req.body,
       projectId,
@@ -49,90 +37,42 @@ sessionRouter.post('/', async (req, res) => {
     };
 
     await pool.execute(
-      `
-      INSERT INTO sessions
-      (
-        project_id,
-        session_data,
-        timestamp,
-        recorded_at
-      )
-      VALUES (?,?,?,?)
-      `,
-      [
-        projectId,
-        JSON.stringify(sessionData),
-        now,
-        recordedAt
-      ]
+      `INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?,?,?,?)`,
+      [projectId, JSON.stringify(sessionData), now, recordedAt]
     );
 
-    res.json({
-      success: true,
-      recorded: true
-    });
+    res.json({ success: true, recorded: true });
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
-      error: "Session save failed"
-    });
+    res.status(500).json({ error: "Session save failed" });
   }
 });
 
 // ======================================================
-// SESSION LIST
-// Metadata only - no rrweb events
-//
-// GET /api/custom/:projectId/session
+// SESSION LIST - Updated to 200
 // ======================================================
 sessionRouter.get('/', async (req, res) => {
-  if (!pool)
-    return res.status(500).json({
-      error: "Database not initialized"
-    });
-
+  if (!pool) return res.status(500).json({ error: "Database not initialized" });
   try {
     const { projectId } = req.params;
-
     const limit = Math.min(
       Math.max(1, parseInt(req.query.limit, 10) || 50),
-      100
+      200   // ← Increased to 200
     );
-
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
 
-    // Using pool.query instead of pool.execute allows bound parameters for LIMIT & OFFSET
     const [rows] = await pool.query(
       `
       SELECT
         id,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.sessionId')
-        ) sessionId,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.visitorId')
-        ) visitorId,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.ip')
-        ) ip,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.url')
-        ) url,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.userAgent')
-        ) userAgent,
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data, '$.screenResolution')
-        ) screenResolution,
-        JSON_EXTRACT(
-          session_data,
-          '$.viewportWidth'
-        ) viewportWidth,
-        JSON_EXTRACT(
-          session_data,
-          '$.viewportHeight'
-        ) viewportHeight,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) sessionId,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.visitorId')) visitorId,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.ip')) ip,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.url')) url,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.userAgent')) userAgent,
+        JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.screenResolution')) screenResolution,
+        JSON_EXTRACT(session_data, '$.viewportWidth') viewportWidth,
+        JSON_EXTRACT(session_data, '$.viewportHeight') viewportHeight,
         timestamp,
         recorded_at
       FROM sessions
@@ -141,68 +81,40 @@ sessionRouter.get('/', async (req, res) => {
       LIMIT ?
       OFFSET ?
       `,
-      [
-        projectId,
-        limit,
-        offset
-      ]
+      [projectId, limit, offset]
     );
 
-    res.json({
-      sessions: rows,
-      limit,
-      offset
-    });
+    res.json({ sessions: rows, limit, offset });
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
-      error: "Session list failed"
-    });
+    res.status(500).json({ error: "Session list failed" });
   }
 });
 
 // ======================================================
 // LOAD ONE COMPLETE SESSION REPLAY
-//
-// GET /api/custom/:projectId/session/:sessionId
 // ======================================================
 sessionRouter.get('/:sessionId', async (req, res) => {
-  if (!pool)
-    return res.status(500).json({
-      error: "Database not initialized"
-    });
-
+  if (!pool) return res.status(500).json({ error: "Database not initialized" });
   try {
     const { projectId, sessionId } = req.params;
-
     const [rows] = await pool.execute(
       `
       SELECT session_data
       FROM sessions
       WHERE project_id = ?
-      AND JSON_UNQUOTE(
-        JSON_EXTRACT(session_data, '$.sessionId')
-      ) = ?
+      AND JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) = ?
       ORDER BY id ASC
       `,
       [projectId, sessionId]
     );
 
-    if (rows.length === 0)
-      return res.status(404).json({
-        error: "Session not found"
-      });
+    if (rows.length === 0) return res.status(404).json({ error: "Session not found" });
 
     const events = [];
     let details = {};
-
     for (const row of rows) {
-      const data =
-        typeof row.session_data === "string"
-          ? JSON.parse(row.session_data)
-          : row.session_data;
-
+      const data = typeof row.session_data === "string" ? JSON.parse(row.session_data) : row.session_data;
       if (!details.sessionId) {
         details = {
           sessionId: data.sessionId,
@@ -216,7 +128,6 @@ sessionRouter.get('/:sessionId', async (req, res) => {
           timestamp: data.timestamp
         };
       }
-
       if (Array.isArray(data.events)) {
         events.push(...data.events);
       }
@@ -230,48 +141,29 @@ sessionRouter.get('/:sessionId', async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
-      error: "Replay load failed"
-    });
+    res.status(500).json({ error: "Replay load failed" });
   }
 });
 
 // ======================================================
 // DELETE SESSION
-//
-// DELETE /api/custom/:projectId/session/:sessionId
 // ======================================================
 sessionRouter.delete('/:sessionId', async (req, res) => {
-  if (!pool)
-    return res.status(500).json({
-      error: "Database not initialized"
-    });
-
+  if (!pool) return res.status(500).json({ error: "Database not initialized" });
   try {
     const { projectId, sessionId } = req.params;
-
     await pool.execute(
       `
       DELETE FROM sessions
       WHERE project_id = ?
-      AND JSON_UNQUOTE(
-        JSON_EXTRACT(session_data, '$.sessionId')
-      ) = ?
+      AND JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) = ?
       `,
       [projectId, sessionId]
     );
-
-    res.json({
-      success: true,
-      deleted: true
-    });
+    res.json({ success: true, deleted: true });
   } catch (error) {
     console.error(error);
-
-    res.status(500).json({
-      error: "Delete failed"
-    });
+    res.status(500).json({ error: "Delete failed" });
   }
 });
 
