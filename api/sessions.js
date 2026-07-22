@@ -9,8 +9,8 @@ export function setSessionPool(mysqlPool) {
 }
 
 
-// Get real IP
 function getClientIp(req) {
+
   const forwarded = req.headers['x-forwarded-for'];
 
   if (forwarded) {
@@ -20,57 +20,53 @@ function getClientIp(req) {
   return (
     req.headers['x-real-ip'] ||
     req.socket?.remoteAddress ||
-    req.connection?.remoteAddress ||
     'unknown'
   );
 }
 
 
+
 // ======================================================
-// SAVE RRWEB SESSION CHUNK
+// SAVE RRWEB CHUNK
 // POST /api/custom/:projectId/session
 // ======================================================
 
-sessionRouter.post('/', async (req, res) => {
+sessionRouter.post('/', async (req,res)=>{
 
-  if (!pool) {
+  if(!pool)
     return res.status(500).json({
-      error: 'Database not initialized'
+      error:"Database not initialized"
     });
-  }
 
 
-  try {
+  try{
 
-    const { projectId } = req.params;
+    const {projectId}=req.params;
 
-    const now = new Date();
+    const now=new Date();
 
-    const recordedAt = now
-      .toISOString()
-      .replace(/[:.]/g, '-');
+    const recordedAt =
+      now.toISOString().replace(/[:.]/g,'-');
 
 
-    const fullSessionData = {
+    const sessionData={
 
       ...req.body,
 
       projectId,
 
-      ip: getClientIp(req),
-
-      timestamp: now.toISOString(),
+      ip:getClientIp(req),
 
       recordedAt,
 
-      recordedVia: 'custom'
+      timestamp:now.toISOString(),
+
+      recordedVia:"custom"
 
     };
 
 
-
     await pool.execute(
-
       `
       INSERT INTO sessions
       (
@@ -79,18 +75,15 @@ sessionRouter.post('/', async (req, res) => {
         timestamp,
         recorded_at
       )
-      VALUES (?, ?, ?, ?)
+      VALUES (?,?,?,?)
       `,
-
       [
         projectId,
-        JSON.stringify(fullSessionData),
+        JSON.stringify(sessionData),
         now,
         recordedAt
       ]
-
     );
-
 
 
     res.json({
@@ -99,18 +92,12 @@ sessionRouter.post('/', async (req, res) => {
     });
 
 
+  }catch(error){
 
-  } catch(error) {
-
-
-    console.error(
-      "Session save error:",
-      error.message
-    );
-
+    console.error(error);
 
     res.status(500).json({
-      error:"Failed to save session"
+      error:"Session save failed"
     });
 
   }
@@ -120,75 +107,104 @@ sessionRouter.post('/', async (req, res) => {
 
 
 
+
 // ======================================================
-// LIST SESSIONS
-// Only metadata
+// SESSION LIST
+// Metadata only - no rrweb events
+//
 // GET /api/custom/:projectId/session
 // ======================================================
 
 sessionRouter.get('/', async(req,res)=>{
 
 
-  if(!pool){
-
+  if(!pool)
     return res.status(500).json({
-      error:'Database not initialized'
+      error:"Database not initialized"
     });
 
-  }
+
+  try{
 
 
-  try {
+    const {projectId}=req.params;
 
 
-    const { projectId } = req.params;
+    const limit=Math.min(
+      Number(req.query.limit)||50,
+      100
+    );
 
 
-    const limit =
-      Math.min(
-        Number(req.query.limit) || 50,
-        100
-      );
-
-
-    const offset =
-      Number(req.query.offset) || 0;
+    const offset=
+      Number(req.query.offset)||0;
 
 
 
-    const [rows] = await pool.execute(
+    const [rows]=await pool.execute(
 
       `
       SELECT
 
-        id,
+      id,
 
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data,'$.sessionId')
-        ) AS sessionId,
-
-
-        JSON_UNQUOTE(
-          JSON_EXTRACT(session_data,'$.visitorId')
-        ) AS visitorId,
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.sessionId')
+      ) sessionId,
 
 
-        timestamp,
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.visitorId')
+      ) visitorId,
 
-        recorded_at
+
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.ip')
+      ) ip,
+
+
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.url')
+      ) url,
+
+
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.userAgent')
+      ) userAgent,
+
+
+      JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.screenResolution')
+      ) screenResolution,
+
+
+      JSON_EXTRACT(
+        session_data,
+        '$.viewportWidth'
+      ) viewportWidth,
+
+
+      JSON_EXTRACT(
+        session_data,
+        '$.viewportHeight'
+      ) viewportHeight,
+
+
+      timestamp,
+
+      recorded_at
 
 
       FROM sessions
 
 
-      WHERE project_id = ?
+      WHERE project_id=?
 
 
       ORDER BY id DESC
 
 
       LIMIT ?
-
       OFFSET ?
 
       `,
@@ -202,7 +218,6 @@ sessionRouter.get('/', async(req,res)=>{
     );
 
 
-
     res.json({
 
       sessions:rows,
@@ -214,20 +229,13 @@ sessionRouter.get('/', async(req,res)=>{
     });
 
 
-
   }catch(error){
 
-
-    console.error(
-      "Session list error:",
-      error.message
-    );
-
+    console.error(error);
 
     res.status(500).json({
-      error:"Failed to fetch sessions"
+      error:"Session list failed"
     });
-
 
   }
 
@@ -238,24 +246,20 @@ sessionRouter.get('/', async(req,res)=>{
 
 
 
+
 // ======================================================
-// GET COMPLETE ONE SESSION REPLAY
+// LOAD ONE COMPLETE SESSION REPLAY
 //
 // GET /api/custom/:projectId/session/:sessionId
-//
-// No limit because one sessionId is already isolated
 // ======================================================
 
-sessionRouter.get('/:sessionId', async(req,res)=>{
+sessionRouter.get('/:sessionId',async(req,res)=>{
 
 
-  if(!pool){
-
+  if(!pool)
     return res.status(500).json({
-      error:'Database not initialized'
+      error:"Database not initialized"
     });
-
-  }
 
 
 
@@ -265,22 +269,23 @@ sessionRouter.get('/:sessionId', async(req,res)=>{
     const {
       projectId,
       sessionId
-    } = req.params;
+    }=req.params;
 
 
 
-    const [rows] = await pool.execute(
+    const [rows]=await pool.execute(
 
       `
       SELECT session_data
 
       FROM sessions
 
-      WHERE project_id = ?
+      WHERE project_id=?
 
       AND JSON_UNQUOTE(
         JSON_EXTRACT(session_data,'$.sessionId')
-      ) = ?
+      )=?
+
 
       ORDER BY id ASC
 
@@ -295,46 +300,48 @@ sessionRouter.get('/:sessionId', async(req,res)=>{
 
 
 
-    if(rows.length === 0){
-
+    if(rows.length===0)
       return res.status(404).json({
-
         error:"Session not found"
-
       });
 
-    }
 
 
+    const events=[];
 
-
-    const events = [];
-
-    let sessionInfo = {};
+    let details={};
 
 
 
     for(const row of rows){
 
 
-      const data =
-        typeof row.session_data === "string"
+      const data=
+        typeof row.session_data==="string"
         ? JSON.parse(row.session_data)
         : row.session_data;
 
 
 
-      if(!sessionInfo.sessionId){
+      if(!details.sessionId){
 
-        sessionInfo = {
+        details={
 
           sessionId:data.sessionId,
 
           visitorId:data.visitorId,
 
+          ip:data.ip,
+
           url:data.url,
 
           userAgent:data.userAgent,
+
+          screenResolution:data.screenResolution,
+
+          viewportWidth:data.viewportWidth,
+
+          viewportHeight:data.viewportHeight,
 
           timestamp:data.timestamp
 
@@ -346,9 +353,7 @@ sessionRouter.get('/:sessionId', async(req,res)=>{
 
       if(Array.isArray(data.events)){
 
-        events.push(
-          ...data.events
-        );
+        events.push(...data.events);
 
       }
 
@@ -358,13 +363,13 @@ sessionRouter.get('/:sessionId', async(req,res)=>{
 
     res.json({
 
-      ...sessionInfo,
+      ...details,
 
       events,
 
-      totalChunks: rows.length,
+      chunks:rows.length,
 
-      totalEvents: events.length
+      totalEvents:events.length
 
     });
 
@@ -372,19 +377,83 @@ sessionRouter.get('/:sessionId', async(req,res)=>{
 
   }catch(error){
 
+    console.error(error);
 
-    console.error(
-      "Replay fetch error:",
-      error.message
+    res.status(500).json({
+      error:"Replay load failed"
+    });
+
+  }
+
+});
+
+
+
+
+
+
+
+// ======================================================
+// DELETE SESSION
+//
+// DELETE /api/custom/:projectId/session/:sessionId
+// ======================================================
+
+sessionRouter.delete('/:sessionId',async(req,res)=>{
+
+
+  if(!pool)
+    return res.status(500).json({
+      error:"Database not initialized"
+    });
+
+
+
+  try{
+
+
+    const {
+      projectId,
+      sessionId
+    }=req.params;
+
+
+
+    await pool.execute(
+
+      `
+      DELETE FROM sessions
+
+      WHERE project_id=?
+
+      AND JSON_UNQUOTE(
+        JSON_EXTRACT(session_data,'$.sessionId')
+      )=?
+
+      `,
+
+      [
+        projectId,
+        sessionId
+      ]
+
     );
 
 
-    res.status(500).json({
-
-      error:"Failed to load replay"
-
+    res.json({
+      success:true,
+      deleted:true
     });
 
+
+
+  }catch(error){
+
+    console.error(error);
+
+    res.status(500).json({
+      error:"Delete failed"
+    });
 
   }
 
