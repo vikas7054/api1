@@ -95,7 +95,6 @@ sessionRouter.get('/', async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Sanitize and convert limit and offset to pure integers
     const limit = Math.min(
       Math.max(1, parseInt(req.query.limit, 10) || 50),
       100
@@ -103,8 +102,8 @@ sessionRouter.get('/', async (req, res) => {
 
     const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
 
-    // Integers are interpolated directly to avoid MySQL prepared statement LIMIT binding errors
-    const [rows] = await pool.execute(
+    // Using pool.query instead of pool.execute allows bound parameters for LIMIT & OFFSET
+    const [rows] = await pool.query(
       `
       SELECT
         id,
@@ -139,9 +138,14 @@ sessionRouter.get('/', async (req, res) => {
       FROM sessions
       WHERE project_id = ?
       ORDER BY id DESC
-      LIMIT ${limit} OFFSET ${offset}
+      LIMIT ?
+      OFFSET ?
       `,
-      [projectId]
+      [
+        projectId,
+        limit,
+        offset
+      ]
     );
 
     res.json({
