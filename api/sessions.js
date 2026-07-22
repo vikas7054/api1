@@ -2,115 +2,307 @@ import express from 'express';
 
 const sessionRouter = express.Router({ mergeParams: true });
 
-// Shared pool reference passed down from custom.js
 let pool = null;
 
 export function setSessionPool(mysqlPool) {
   pool = mysqlPool;
 }
 
-// Helper to extract real IP from request
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
+
   if (forwarded) {
-    const ips = forwarded.split(',').map(ip => ip.trim());
-    return ips[0] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+    return forwarded.split(',')[0].trim();
   }
-  return req.headers['x-real-ip'] || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+
+  return (
+    req.headers['x-real-ip'] ||
+    req.connection?.remoteAddress ||
+    req.socket?.remoteAddress ||
+    'unknown'
+  );
 }
 
-// ============ SINGLE SESSION ENDPOINT ============
+
+// ======================================================
+// SAVE RRWEB SESSION CHUNK
+// POST /api/custom/:projectId/session
+// ======================================================
 
 sessionRouter.post('/', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
+  if (!pool) {
+    return res.status(500).json({
+      error: 'Database not initialized'
+    });
+  }
 
   try {
     const { projectId } = req.params;
-    const ip = getClientIp(req);
-    const timestamp = new Date().toISOString();
-    const recordedAt = timestamp.replace(/[:.]/g, '-');
 
-    const { meta, ...sessionData } = req.body;
-    const fullSessionData = {
-      ...sessionData,
+    const ip = getClientIp(req);
+    const now = new Date();
+
+    const recordedAt = now
+      .toISOString()
+      .replace(/[:.]/g, '-');
+
+
+    const sessionData = {
+      ...req.body,
       projectId,
       ip,
-      timestamp,
+      timestamp: now.toISOString(),
       recordedAt,
-      recordedVia: 'custom',
-      meta: meta || {}
+      recordedVia: 'custom'
     };
 
+
     await pool.execute(
-      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
-      [projectId, JSON.stringify(fullSessionData), new Date(), recordedAt]
-    );
-    res.status(200).json({ success: true, recorded: true });
-  } catch (error) {
-    console.error('Custom API: Session save error:', error.message);
-    res.status(500).json({ error: 'Failed to save session', details: error.message });
-  }
-});
-
-sessionRouter.get('s', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
-    const offset = parseInt(req.query.offset) || 0;
-
-    const [rows] = await pool.execute(
-      'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?',
-      [projectId, limit, offset]
-    );
-    const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
-    res.json({ sessions, limit, offset, count: sessions.length });
-  } catch (error) {
-    console.error('Custom API: Sessions fetch error:', error.message);
-    res.status(500).json({ error: 'Failed to read sessions', details: error.message });
-  }
-});
-
-// ============ SESSION BATCH ENDPOINT ============
-
-sessionRouter.post('s/batch', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId } = req.params;
-    const { sessions: sessionBatch } = req.body;
-
-    if (!Array.isArray(sessionBatch) || sessionBatch.length === 0) {
-      return res.status(400).json({ error: 'sessions array is required' });
-    }
-
-    const ip = getClientIp(req);
-    const timestamp = new Date().toISOString();
-    const recordedAt = timestamp.replace(/[:.]/g, '-');
-
-    const values = sessionBatch.map(session => {
-      const sessionData = {
-        ...session,
-        projectId,
-        ip,
+      `
+      INSERT INTO sessions
+      (
+        project_id,
+        session_data,
         timestamp,
-        recordedAt,
-        recordedVia: 'custom-batch'
-      };
-      return [projectId, JSON.stringify(sessionData), new Date(), recordedAt];
+        recorded_at
+      )
+      VALUES (?, ?, ?, ?)
+      `,
+      [
+        projectId,
+        JSON.stringify(sessionData),
+        now,
+        recordedAt
+      ]
+    );
+
+
+    res.json({
+      success: true,
+      recorded: true
     });
 
-    await pool.query(
-      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES ?',
-      [values]
+
+  } catch (error) {
+
+    console.error(
+      'Session save error:',
+      error.message
     );
 
-    res.status(200).json({ success: true, recorded: sessionBatch.length });
-  } catch (error) {
-    console.error('Custom API: Batch session error:', error.message);
-    res.status(500).json({ error: 'Failed to save sessions batch', details: error.message });
+    res.status(500).json({
+      error: 'Failed to save session'
+    });
+
   }
 });
+
+
+
+// ======================================================
+// LIST SESSIONS (WITHOUT RRWEB DATA)
+// GET /api/custom/:projectId/session
+// ======================================================
+
+sessionRouter.get('/', async (req, res) => {
+
+  if (!pool) {
+    return res.status(500).json({
+      error: 'Database not initialized'
+    });
+  }
+
+
+  try {
+
+    const { projectId } = req.params;
+
+
+    const limit = Math.min(
+      Number(req.query.limit) || 50,
+      100
+    );
+
+
+    const offset =
+      Number(req.query.offset) || 0;
+
+
+
+    const [rows] = await pool.execute(
+      `
+      SELECT
+        id,
+        JSON_UNQUOTE(
+          JSON_EXTRACT(session_data,'$.sessionId')
+        ) AS sessionId,
+
+        JSON_UNQUOTE(
+          JSON_EXTRACT(session_data,'$.visitorId')
+        ) AS visitorId,
+
+        timestamp,
+        recorded_at
+
+      FROM sessions
+
+      WHERE project_id = ?
+
+      ORDER BY id DESC
+
+      LIMIT ?
+      OFFSET ?
+      `,
+      [
+        projectId,
+        limit,
+        offset
+      ]
+    );
+
+
+    res.json({
+      sessions: rows,
+      limit,
+      offset
+    });
+
+
+  } catch(error) {
+
+    console.error(
+      'Session list error:',
+      error.message
+    );
+
+
+    res.status(500).json({
+      error:'Failed to fetch sessions'
+    });
+
+  }
+
+});
+
+
+
+
+// ======================================================
+// FETCH ONE SESSION REPLAY
+// GET /api/custom/:projectId/session/:sessionId
+// ======================================================
+
+sessionRouter.get('/:sessionId', async (req, res) => {
+
+  if (!pool) {
+    return res.status(500).json({
+      error:'Database not initialized'
+    });
+  }
+
+
+  try {
+
+    const {
+      projectId,
+      sessionId
+    } = req.params;
+
+
+    const limit = Math.min(
+      Number(req.query.limit) || 500,
+      1000
+    );
+
+
+    const offset =
+      Number(req.query.offset) || 0;
+
+
+
+    const [rows] = await pool.execute(
+      `
+      SELECT
+        session_data
+
+      FROM sessions
+
+      WHERE project_id = ?
+
+      AND JSON_UNQUOTE(
+          JSON_EXTRACT(session_data,'$.sessionId')
+      ) = ?
+
+      ORDER BY id ASC
+
+      LIMIT ?
+      OFFSET ?
+      `,
+      [
+        projectId,
+        sessionId,
+        limit,
+        offset
+      ]
+    );
+
+
+
+    const events = [];
+
+
+    for (const row of rows) {
+
+      const data =
+        typeof row.session_data === 'string'
+          ? JSON.parse(row.session_data)
+          : row.session_data;
+
+
+      if (Array.isArray(data.events)) {
+
+        events.push(
+          ...data.events
+        );
+
+      }
+
+    }
+
+
+
+    res.json({
+
+      sessionId,
+
+      events,
+
+      nextOffset:
+        offset + rows.length,
+
+      hasMore:
+        rows.length === limit
+
+    });
+
+
+
+  } catch(error) {
+
+
+    console.error(
+      'Replay fetch error:',
+      error.message
+    );
+
+
+    res.status(500).json({
+      error:'Failed to fetch replay'
+    });
+
+  }
+
+});
+
 
 export default sessionRouter;
