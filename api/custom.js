@@ -5,9 +5,13 @@
  */
 
 import express from 'express';
-import mysql from 'mysql2/promise'; // Added missing driver import
+import mysql from 'mysql2/promise';
+import sessionsRouter, { setSessionsPool } from './sessions.js';
 
 const customRouter = express.Router();
+
+// Mount sessions router (All session endpoints will be accessible via /api/custom/...)
+customRouter.use('/', sessionsRouter);
 
 // Initialize the single pool variable reference
 let pool = null;
@@ -25,9 +29,10 @@ function getClientIp(req) {
 // Exportable setter function for server.js to pass its pool instance
 export function setCustomPool(mysqlPool) {
   pool = mysqlPool;
+  setSessionsPool(mysqlPool); // Pass pool down to sessions module
 }
 
-// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one
+// Fallback configuration block
 try {
   pool = mysql.createPool({
     host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
@@ -81,100 +86,6 @@ customRouter.get('/:projectId/events', async (req, res) => {
   } catch (error) {
     console.error('Custom API: Events fetch error:', error.message);
     res.status(500).json({ error: 'Failed to read events', details: error.message });
-  }
-});
-
-// ============ CUSTOM PROJECT-SCOPED SESSIONS ============
-
-customRouter.post('/:projectId/session', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId } = req.params;
-    const ip = getClientIp(req);
-    const timestamp = new Date().toISOString();
-    const recordedAt = timestamp.replace(/[:.]/g, '-');
-
-    const { meta, ...sessionData } = req.body;
-    const fullSessionData = {
-      ...sessionData,
-      projectId,
-      ip,
-      timestamp,
-      recordedAt,
-      recordedVia: 'custom',
-      meta: meta || {}
-    };
-
-    await pool.execute(
-      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
-      [projectId, JSON.stringify(fullSessionData), new Date(), recordedAt]
-    );
-    res.status(200).json({ success: true, recorded: true });
-  } catch (error) {
-    console.error('Custom API: Session save error:', error.message);
-    res.status(500).json({ error: 'Failed to save session', details: error.message });
-  }
-});
-
-customRouter.get('/:projectId/sessions', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId } = req.params;
-    const limit = parseInt(req.query.limit) || 50;
-    const offset = parseInt(req.query.offset) || 0;
-
-    const [rows] = await pool.execute(
-      'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?',
-      [projectId, limit, offset]
-    );
-    const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
-    res.json({ sessions, limit, offset, count: sessions.length });
-  } catch (error) {
-    console.error('Custom API: Sessions fetch error:', error.message);
-    res.status(500).json({ error: 'Failed to read sessions', details: error.message });
-  }
-});
-
-// ============ SESSION BATCH ENDPOINT ============
-
-customRouter.post('/:projectId/sessions/batch', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId } = req.params;
-    const { sessions: sessionBatch } = req.body;
-
-    if (!Array.isArray(sessionBatch) || sessionBatch.length === 0) {
-      return res.status(400).json({ error: 'sessions array is required' });
-    }
-
-    const ip = getClientIp(req);
-    const timestamp = new Date().toISOString();
-    const recordedAt = timestamp.replace(/[:.]/g, '-');
-
-    const values = sessionBatch.map(session => {
-      const sessionData = {
-        ...session,
-        projectId,
-        ip,
-        timestamp,
-        recordedAt,
-        recordedVia: 'custom-batch'
-      };
-      return [projectId, JSON.stringify(sessionData), new Date(), recordedAt];
-    });
-
-    await pool.query(
-      'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES ?',
-      [values]
-    );
-
-    res.status(200).json({ success: true, recorded: sessionBatch.length });
-  } catch (error) {
-    console.error('Custom API: Batch session error:', error.message);
-    res.status(500).json({ error: 'Failed to save sessions batch', details: error.message });
   }
 });
 
@@ -287,43 +198,17 @@ customRouter.delete('/:projectId/prune', async (req, res) => {
 // ============ CUSTOM TRACKING SCRIPT (per project) ============
 
 const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
-//
-// HOW TO TURN THINGS ON/OFF:
-// Just edit the CONFIG object below. No dashboard, no HTML needed.
-//   rrwebRecording: true  -> session replay recording auto-starts (default)
-//   rrwebRecording: false -> session replay never starts, nothing sent for it
-//   eventTracking:  true  -> pageview/click/custom events send to API (default)
-//   eventTracking:  false -> events are blocked locally, nothing sent
-//   autoClicks:     true  -> clicks are tracked automatically (default)
-//   autoClicks:     false -> clicks are not tracked
-//
-// These same 3 switches can ALSO be controlled at runtime from your own code:
-//   window.AnalyticsTracker.stopSession() / startSession()
-//   window.AnalyticsTracker.disableEvents() / enableEvents()
-//   window.AnalyticsTracker.disableAutoClicks() / enableAutoClicks()
-//
-// Single-tag install — server injects the project ID automatically:
-//   <script src="https://api1-orpin.vercel.app/api/custom/PROJECT_ID/tracking.js" defer></script>
 (function() {
   const API_URL = 'https://api1-orpin.vercel.app/api/custom';
   const RRWEB_URL = 'https://unpkg.com/rrweb@2.0.0-alpha.4/dist/rrweb.min.js';
 
-  // ---- EDIT THESE TO SET DEFAULTS FOR THIS PROJECT ----
   const CONFIG = {
-    rrwebRecording: true,   // session replay recording — ON
-    eventTracking: true,    // pageview / click / custom events — on by default
-    autoClicks: true,       // automatic click capture — on by default
-    inactivityTimeoutMinutes: 5, // after this many minutes with no interaction, stop sending;
-                                  // a new session ID is issued when the user comes back.
-                                  // Set to false (or 0) to turn this off completely —
-                                  // script then behaves exactly like before, no timeout at all.
-    mouseMoveSampling: 20   // ms between recorded mouse positions.
-                            // Lower (e.g. 20) = smoother replay, more data sent.
-                            // Higher (e.g. 300-500) = choppier replay, less data sent.
-                            // Set very high (e.g. 999999) to basically only capture clicks,
-                            // not continuous movement.
+    rrwebRecording: true,
+    eventTracking: true,
+    autoClicks: true,
+    inactivityTimeoutMinutes: 5,
+    mouseMoveSampling: 20
   };
-  // -------------------------------------------------------
 
   let events = [];
   let recording = false;
@@ -382,19 +267,11 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     return sessionId;
   }
 
-  // ---- Inactivity handling ----
-  // If there's no interaction for CONFIG.inactivityTimeoutMinutes, stop sending
-  // data to the API and drop whatever's buffered. When the user interacts again,
-  // a brand new session ID is issued — nothing after resuming uses the old one.
   function startNewSessionAfterInactivity() {
     const newId = generateId();
     sessionStorage.setItem('sessionId', newId);
-    events = []; // discard anything buffered from before the gap, it's stale
+    events = [];
 
-    // rrweb only records a full DOM snapshot once, at the moment recording starts.
-    // Everything after that is incremental diffs. Since the recorder itself never
-    // stopped while inactive, the new session needs its own full snapshot as the
-    // first event, or the player has nothing to reconstruct the page from.
     if (recording && typeof rrweb !== 'undefined' && rrweb.record && typeof rrweb.record.takeFullSnapshot === 'function') {
       rrweb.record.takeFullSnapshot();
     }
@@ -409,25 +286,24 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
   }
 
   function checkInactivity() {
-    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled, do nothing
+    if (!CONFIG.inactivityTimeoutMinutes) return;
     if (isInactive) return;
     const timeoutMs = CONFIG.inactivityTimeoutMinutes * 60 * 1000;
     if (Date.now() - lastActivityTime >= timeoutMs) {
       isInactive = true;
-      events = []; // stop carrying stale buffered data forward
+      events = [];
     }
   }
 
   function startInactivityWatcher() {
-    if (!CONFIG.inactivityTimeoutMinutes) return; // feature disabled — old behavior, no watcher at all
+    if (!CONFIG.inactivityTimeoutMinutes) return;
     ['mousemove', 'keydown', 'scroll', 'click', 'touchstart'].forEach(function(evt) {
       document.addEventListener(evt, handleActivity, { passive: true });
     });
     if (inactivityCheckInterval) clearInterval(inactivityCheckInterval);
-    inactivityCheckInterval = setInterval(checkInactivity, 30000); // check every 30s
+    inactivityCheckInterval = setInterval(checkInactivity, 30000);
   }
 
-  // ---- Session recording (rrweb) ----
   function startRecording() {
     if (recording || !getProjectId()) return;
 
@@ -460,11 +336,11 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     if (typeof stopFn === 'function') { stopFn(); stopFn = null; }
     if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
     recording = false;
-    sendEvents(); // flush what's left
+    sendEvents();
   }
 
   async function sendEvents() {
-    if (isInactive) return; // paused — user inactive past the timeout
+    if (isInactive) return;
     if (events.length === 0 || !getProjectId()) return;
 
     const eventsToSend = events.splice(0, events.length);
@@ -493,17 +369,10 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   }
 
-  // ---- Events (pageview / click / custom) ----
   function trackEvent(eventName, eventData) {
-    if (isInactive) return; // paused — user inactive past the timeout
-    if (!eventsOn) {
-      console.warn('Analytics: eventTracking is OFF (CONFIG.eventTracking / disableEvents()) — "' + eventName + '" was NOT sent.');
-      return;
-    }
-    if (!getProjectId()) {
-      console.warn('Analytics: No project ID configured.');
-      return;
-    }
+    if (isInactive) return;
+    if (!eventsOn) return;
+    if (!getProjectId()) return;
 
     var event = {
       timestamp: new Date().toISOString(),
@@ -560,9 +429,6 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
   function enableEvents() { eventsOn = true; }
   function disableEvents() { eventsOn = false; }
 
-  // Mouse tracking presets. rrweb's sampling rate is locked in when recording
-  // starts, so switching it means restarting the recorder (which also takes
-  // a fresh full snapshot, same as the inactivity-resume flow above).
   function setMouseTrackingSmooth() {
     CONFIG.mouseMoveSampling = 20;
     if (recording) { stopRecording(); startRecording(); }
@@ -592,7 +458,6 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   });
 
-  // Auto-init: project ID is already injected server-side.
   if (projectId) {
     if (document.readyState === 'complete') {
       init(projectId);
@@ -601,51 +466,6 @@ const DEFAULT_TRACKING_SCRIPT = ` // Web Analytics Tracking Script
     }
   }
 
-  // ============================================================
-  // EXAMPLE: custom events — DISABLED by default, just a template.
-  // Everything below is commented out, so none of it runs on its own.
-  // Each example is wired to a REAL element with addEventListener, so if
-  // you uncomment one, give the matching id="..." to your actual HTML
-  // element and it will just work — no page-load misfires.
-  // ============================================================
-  //
-  // Track a custom event with optional data (call this from anywhere
-  // in your own code, at the exact moment you want it to fire):
-  // trackEvent('event_name', {
-  //   category: 'category',
-  //   label: 'label',
-  //   value: 123
-  // });
-  //
-  // Form Submissions — put id="contact-form" on your <form>
-  // document.getElementById('contact-form')?.addEventListener('submit', function() {
-  //   trackEvent('form_submit', {
-  //     formId: 'contact',
-  //     success: true
-  //   });
-  // });
-  //
-  // Feature Usage — put id="search-input" on your search box, fires after Enter
-  // document.getElementById('search-input')?.addEventListener('keydown', function(e) {
-  //   if (e.key === 'Enter') {
-  //     trackEvent('feature_used', {
-  //       feature: 'search',
-  //       query: e.target.value
-  //     });
-  //   }
-  // });
-  //
-  // CTA Clicks — put id="signup-hero-btn" on your button/link
-  // document.getElementById('signup-hero-btn')?.addEventListener('click', function() {
-  //   trackEvent('cta_click', {
-  //     ctaId: 'signup-hero',
-  //     location: 'header'
-  //   });
-  // });
-  //
-  // ============================================================
-
-  // Runtime control, in case you want to flip things without editing CONFIG.
   window.trackEvent = trackEvent;
   window.AnalyticsTracker = {
     init: init,
@@ -687,7 +507,6 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
     if (rows.length > 0) {
       scriptContent = rows[0].script_content;
     } else {
-      // No custom script saved yet — return default and persist it
       scriptContent = DEFAULT_TRACKING_SCRIPT;
       await pool.execute(
         'INSERT INTO tracking_scripts (project_id, script_content) VALUES (?, ?)',
@@ -695,7 +514,6 @@ customRouter.get('/:projectId/tracking.js', async (req, res) => {
       );
     }
 
-    // Inject the real project ID server-side so the client doesn't need to detect it
     scriptContent = scriptContent.replace(/__PROJECT_ID__/g, projectId);
 
     res.set('Content-Type', 'application/javascript');
