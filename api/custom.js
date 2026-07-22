@@ -27,17 +27,10 @@ export function setCustomPool(mysqlPool) {
   pool = mysqlPool;
 }
 
-// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one.
-// NOTE: this previously had a real DB password hardcoded as a default — that credential should be
-// rotated in TiDB Cloud immediately if it hasn't been already. The fallback now refuses to start
-// instead of silently using a real secret.
-if (!pool) {
-  if (!process.env.DB_PASSWORD) {
-    console.error('Custom API: DB_PASSWORD env var missing — refusing to start standalone fallback pool.');
-  } else {
-    try {
-      pool = mysql.createPool({
-         host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
+// Fallback configuration block: Creates a standalone local fallback pool if server.js doesn't provide one
+try {
+  pool = mysql.createPool({
+    host: process.env.DB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
     port: Number(process.env.DB_PORT) || 4000,
     user: process.env.DB_USERNAME || '3ChjQ4FcUDcf77m.root',
     password: process.env.DB_PASSWORD || 'xOdRVKiNEHvB5ZZL',
@@ -45,13 +38,10 @@ if (!pool) {
     ssl: { rejectUnauthorized: true },
     waitForConnections: true,
     connectionLimit: 10,
-      });
-    } catch (err) {
-      console.error('Custom API: Standalone fallback database connection failed:', err.message);
-    }
-  }
+  });
+} catch (err) {
+  console.error('Custom API: Standalone fallback database connection failed:', err.message);
 }
-
 
 // ============ CUSTOM PROJECT-SCOPED EVENTS ============
 
@@ -79,19 +69,12 @@ customRouter.get('/:projectId/events', async (req, res) => {
 
   try {
     const { projectId } = req.params;
-    // Sanitize as integers first — safe to inline directly below.
-    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
-    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const limit = parseInt(req.query.limit) || 100;
+    const offset = parseInt(req.query.offset) || 0;
 
-    // IMPORTANT: LIMIT/OFFSET are inlined here, not passed as `?` placeholders.
-    // pool.execute() uses prepared statements, and LIMIT/OFFSET passed as bound
-    // parameters can silently fail to apply in mysql2 (query runs as if no
-    // limit was set at all, pulling the full table). Since limit/offset are
-    // already forced to integers above, string-inlining them here is safe —
-    // no injection risk, only project_id stays a bound parameter.
     const [rows] = await pool.execute(
-      `SELECT event_data FROM events WHERE project_id = ? ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`,
-      [projectId]
+      'SELECT event_data FROM events WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+      [projectId, limit, offset]
     );
     const events = rows.map(r => typeof r.event_data === 'string' ? JSON.parse(r.event_data) : r.event_data);
     res.json({ events, limit, offset, count: events.length });
@@ -139,83 +122,18 @@ customRouter.get('/:projectId/sessions', async (req, res) => {
 
   try {
     const { projectId } = req.params;
-    // Sanitize as integers first — safe to inline directly below.
-    // Cap the max limit hard: session_data rows can carry heavy rrweb payloads
-    // (canvas frames, full DOM snapshots), so even a "reasonable-looking" limit
-    // like 500 can still blow the server memory limit if rows are large.
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
 
-    // IMPORTANT: LIMIT/OFFSET are inlined here, not passed as `?` placeholders.
-    // pool.execute() uses prepared statements, and LIMIT/OFFSET passed as bound
-    // parameters can silently fail to apply in mysql2/TiDB (the query runs as if
-    // no limit was set, pulling the full table regardless of what the frontend
-    // requested). This is almost certainly why "limit=20/25" was still fetching
-    // everything. Since limit/offset are already forced to integers above,
-    // string-inlining them here is safe — no injection risk, only project_id
-    // stays a bound parameter.
     const [rows] = await pool.execute(
-      `SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ${limit} OFFSET ${offset}`,
-      [projectId]
+      'SELECT session_data FROM sessions WHERE project_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?',
+      [projectId, limit, offset]
     );
     const sessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
     res.json({ sessions, limit, offset, count: sessions.length });
   } catch (error) {
     console.error('Custom API: Sessions fetch error:', error.message);
     res.status(500).json({ error: 'Failed to read sessions', details: error.message });
-  }
-});
-
-// GET /:projectId/sessions/:sessionId — fetch every raw row belonging to one session,
-// merged into a single events array. Useful if the frontend ever needs to load a
-// specific session directly (e.g. deep link) without paging through the whole list.
-customRouter.get('/:projectId/sessions/:sessionId', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId, sessionId } = req.params;
-
-    const [rows] = await pool.execute(
-      `SELECT session_data FROM sessions
-       WHERE project_id = ?
-         AND JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) = ?
-       ORDER BY timestamp ASC`,
-      [projectId, sessionId]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    const rawSessions = rows.map(r => typeof r.session_data === 'string' ? JSON.parse(r.session_data) : r.session_data);
-    res.json({ session: rawSessions });
-  } catch (error) {
-    console.error('Custom API: Single session fetch error:', error.message);
-    res.status(500).json({ error: 'Failed to read session', details: error.message });
-  }
-});
-
-// DELETE /:projectId/sessions/:sessionId — this route was MISSING, which is why the
-// delete button in the frontend was failing. A single visitor session can span many
-// rows (the tracker flushes to /session every ~5s), so this deletes every row whose
-// session_data.sessionId matches, not just one row.
-customRouter.delete('/:projectId/sessions/:sessionId', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database not initialized' });
-
-  try {
-    const { projectId, sessionId } = req.params;
-
-    const [result] = await pool.execute(
-      `DELETE FROM sessions
-       WHERE project_id = ?
-         AND JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) = ?`,
-      [projectId, sessionId]
-    );
-
-    res.json({ success: true, deletedRows: result.affectedRows });
-  } catch (error) {
-    console.error('Custom API: Delete session error:', error.message);
-    res.status(500).json({ error: 'Failed to delete session', details: error.message });
   }
 });
 
