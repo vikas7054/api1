@@ -52,7 +52,7 @@ sessionsRouter.post('/:projectId/session', async (req, res) => {
     const timestamp = new Date().toISOString();
     const recordedAt = timestamp.replace(/[:.]/g, '-');
 
-    const { meta, ...sessionData } = req.body;
+    const { meta, ...sessionData } = req.body || {};
     const fullSessionData = {
       ...sessionData,
       projectId,
@@ -63,7 +63,7 @@ sessionsRouter.post('/:projectId/session', async (req, res) => {
       meta: meta || {}
     };
 
-    await pool.execute(
+    await pool.query(
       'INSERT INTO sessions (project_id, session_data, timestamp, recorded_at) VALUES (?, ?, ?, ?)',
       [projectId, JSON.stringify(fullSessionData), new Date(), recordedAt]
     );
@@ -74,18 +74,19 @@ sessionsRouter.post('/:projectId/session', async (req, res) => {
   }
 });
 
-// ============ FETCH SESSIONS LIST (OPTIMIZED: METADATA ONLY) ============
+// ============ FETCH SESSIONS LIST (OPTIMIZED & FIXED LIMIT BUG) ============
 
 sessionsRouter.get('/:projectId/sessions', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
 
   try {
     const { projectId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-    const offset = parseInt(req.query.offset) || 0;
+    // Explicitly parse to native integers
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
-    // Uses TiDB JSON extraction to strictly avoid transferring heavy events arrays in list views
-    const [rows] = await pool.execute(
+    // CRITICAL FIX: Use pool.query instead of pool.execute for queries with LIMIT/OFFSET parameters
+    const [rows] = await pool.query(
       `SELECT 
         JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.sessionId')) as sessionId,
         JSON_UNQUOTE(JSON_EXTRACT(session_data, '$.visitorId')) as visitorId,
@@ -109,7 +110,7 @@ sessionsRouter.get('/:projectId/sessions', async (req, res) => {
   }
 });
 
-// ============ FETCH SINGLE SESSION (FULL DETAILS & EVENTS FOR PLAYER) ============
+// ============ FETCH SINGLE SESSION (FULL DETAILS FOR PLAYER) ============
 
 sessionsRouter.get('/:projectId/sessions/:sessionId', async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database not initialized' });
@@ -117,7 +118,7 @@ sessionsRouter.get('/:projectId/sessions/:sessionId', async (req, res) => {
   try {
     const { projectId, sessionId } = req.params;
 
-    const [rows] = await pool.execute(
+    const [rows] = await pool.query(
       `SELECT session_data FROM sessions 
        WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ? 
        LIMIT 1`,
@@ -147,7 +148,7 @@ sessionsRouter.delete('/:projectId/sessions/:sessionId', async (req, res) => {
   try {
     const { projectId, sessionId } = req.params;
 
-    const [result] = await pool.execute(
+    const [result] = await pool.query(
       `DELETE FROM sessions WHERE project_id = ? AND JSON_EXTRACT(session_data, '$.sessionId') = ?`,
       [projectId, sessionId]
     );
@@ -166,7 +167,7 @@ sessionsRouter.post('/:projectId/sessions/batch', async (req, res) => {
 
   try {
     const { projectId } = req.params;
-    const { sessions: sessionBatch } = req.body;
+    const { sessions: sessionBatch } = req.body || {};
 
     if (!Array.isArray(sessionBatch) || sessionBatch.length === 0) {
       return res.status(400).json({ error: 'sessions array is required' });
